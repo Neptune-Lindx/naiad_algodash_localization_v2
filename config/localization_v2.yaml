@@ -1,0 +1,35 @@
+naiad_localization_v2:
+  ros__parameters:
+    schedule_period_ms: 20
+    # 压力计，单位 bar。高于 dive_on 进水下，低于 dive_off 出水面。需要按实船标定。
+    dive_on_bar: 1.20
+    dive_off_bar: 1.12
+    align_hold_sec: 30.0
+    wheel_static_m: 0.001
+    # 与 fog/data.gyroscope 同一单位
+    gyro_static: 0.05
+    # motion/data 轮速绝对值不超过该值时视为静止，单位与 wheel_velocity 相同
+    wheel_speed_zero: 0.001
+    # N1 model.sdf，n1_chassis：前 x、上 y、右 z，单位 m。
+    # fog 取 FogImuPublisher 的 source_link（n1_chassis 原点）。
+    # 后轮中心是 left_wheel 与 right_wheel 的中点，与 fog 重合。
+    lever_fog_to_rear_center: [0.0, 0.0, 0.0]
+    # 后轮中心到各里程计轮心。大轮：右、左、前；小轮：右、左。
+    lever_rear_to_motor_right: [0.0, 0.0, 0.4235]
+    lever_rear_to_motor_left: [0.0, 0.0, -0.4235]
+    lever_rear_to_motor_front: [0.68, 0.0, 0.0]
+    lever_rear_to_small_right: [0.0, -0.075, 0.24]
+    lever_rear_to_small_left: [0.0, -0.075, -0.24]
+    motion_topic: motion/data
+    wheel_topic: motion/odometer
+    motor_info_topic: motor/info
+    fog_topic: fog/data
+    fog_state_topic: fog/state
+    depth_topic: sensor_depth/data
+    ais_topic: ais/data
+    profile_topic: robot/profile
+    task_parameter_topic: task/parameter
+    pumpbox_topic: pumpbox/state
+    pushbox_topic: pushbox/state
+    status_topic: localization_v2/status
+    odometry_topic: localization_v2/odometry
