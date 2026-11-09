@@ -306,6 +306,13 @@ HullVariant HullFusion::parse(const std::string & text)
   return HullVariant::Auto;
 }
 
+void HullFusion::set_fog_to_rear_fur(const double lever[3])
+{
+  for (int i = 0; i < 3; ++i) {
+    lever_fur_[i] = lever[i];
+  }
+}
+
 void HullFusion::set_mode_a_origin(const ModeAOrigin & origin)
 {
   origin_ = origin;
@@ -331,7 +338,8 @@ void HullFusion::set_mode_a_origin(const ModeAOrigin & origin)
 
   const double lat = origin.latitude_deg * kDeg2Rad;
   const double lon = origin.longitude_deg * kDeg2Rad;
-  llh_to_ecef(lat, lon, origin.height_m, re_);
+  double r_anchor[3];
+  llh_to_ecef(lat, lon, origin.height_m, r_anchor);
   double c_ne[9];
   ned_to_ecef(lat, lon, c_ne);
   double c_bn[9];
@@ -340,8 +348,24 @@ void HullFusion::set_mode_a_origin(const ModeAOrigin & origin)
   mat_mul(c_ne, c_bn, Cbe_);
   // 还没有 3 min 艏向。准船体航向先冻结为 0：艏向指北，横滚纵摇为 0。
   ship_dcm(0.0, c_ne, Cse_);
+  double l_frd[3];
+  fur_to_frd(lever_fur_, l_frd);
+  double cse_t[9];
+  transpose(Cse_, cse_t);
+  double c_bs[9];
+  mat_mul(cse_t, Cbe_, c_bs);
+  double l_s[3];
+  double l_e[3];
+  mat_vec(c_bs, l_frd, l_s);
+  mat_vec(Cbe_, l_frd, l_e);
+  // 设位和全局锚点都是后轮中心。积分状态仍是 IMU。
+  double p_imu[3];
+  for (int i = 0; i < 3; ++i) {
+    p_imu[i] = origin.p_s[i] - l_s[i];
+    re_[i] = r_anchor[i] - l_e[i];
+  }
   double sp[3];
-  mat_vec(Cse_, origin.p_s, sp);
+  mat_vec(Cse_, p_imu, sp);
   for (int i = 0; i < 3; ++i) {
     rs_[i] = re_[i] - sp[i];
   }
@@ -369,6 +393,22 @@ void HullFusion::project_state()
 
   double c_bs[9];
   mat_mul(cse_t, Cbe_, c_bs);
+  double l_frd[3];
+  fur_to_frd(lever_fur_, l_frd);
+  double l_s[3];
+  mat_vec(c_bs, l_frd, l_s);
+  for (int i = 0; i < 3; ++i) {
+    nav_.p_s[i] += l_s[i];
+  }
+  if (have_prev_) {
+    double wxr[3];
+    cross3(prev_w_, l_frd, wxr);
+    double wxr_s[3];
+    mat_vec(c_bs, wxr, wxr_s);
+    for (int i = 0; i < 3; ++i) {
+      nav_.v_s[i] += wxr_s[i];
+    }
+  }
   double roll = 0.0;
   double pitch = 0.0;
   double yaw = 0.0;
@@ -388,10 +428,16 @@ void HullFusion::project_state()
   nav_.quat_s_y = q[2];
   nav_.quat_s_z = q[3];
 
+  double l_e[3];
+  mat_vec(Cbe_, l_frd, l_e);
+  double r_rear[3];
+  for (int i = 0; i < 3; ++i) {
+    r_rear[i] = re_[i] + l_e[i];
+  }
   double lat = 0.0;
   double lon = 0.0;
   double h = 0.0;
-  ecef_to_llh(re_, &lat, &lon, &h);
+  ecef_to_llh(r_rear, &lat, &lon, &h);
   nav_.latitude_deg = lat * kRad2Deg;
   nav_.longitude_deg = lon * kRad2Deg;
   nav_.height_m = h;
@@ -513,7 +559,9 @@ bool HullFusion::integrate_fog(
   }
   project_state();
   if (wheel_aiding_) {
-    update_nhc(t_sec, w);
+    double l_frd[3];
+    fur_to_frd(lever_fur_, l_frd);
+    update_nhc(t_sec, w, l_frd);
   }
   return true;
 }

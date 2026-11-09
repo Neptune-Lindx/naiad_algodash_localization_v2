@@ -10,6 +10,25 @@ namespace naiad
 {
 namespace localization_v2
 {
+namespace
+{
+
+/// 算法船体系是前 x、右 y、下 z。对外大船坐标是右 x、前 y、上 z。
+void ship_frd_to_rfu(const double frd[3], double rfu[3])
+{
+  rfu[0] = frd[1];
+  rfu[1] = frd[0];
+  rfu[2] = -frd[2];
+}
+
+void ship_rfu_to_frd(const double rfu[3], double frd[3])
+{
+  frd[0] = rfu[1];
+  frd[1] = rfu[0];
+  frd[2] = -rfu[2];
+}
+
+}  // namespace
 
 template <typename MsgT>
 typename rclcpp::Subscription<MsgT>::SharedPtr NodeLocalizationV2::subscribe_input(
@@ -30,6 +49,8 @@ NodeLocalizationV2::NodeLocalizationV2(const std::string & name)
 : rclcpp::Node(name)
 {
   declare_parameter<int>("schedule_period_ms", 20);
+  declare_parameter<double>("wheel_fusion_hz", 50.0);
+  declare_parameter<double>("nhc_hz", 100.0);
   declare_parameter<double>("dive_on_bar", dive_on_bar_);
   declare_parameter<double>("dive_off_bar", dive_off_bar_);
   declare_parameter<double>("align_hold_sec", align_hold_sec_);
@@ -56,6 +77,16 @@ NodeLocalizationV2::NodeLocalizationV2(const std::string & name)
   declare_parameter<std::string>("status_topic", "localization_v2/status");
   declare_parameter<std::string>("odometry_topic", "localization_v2/odometry");
 
+  const double wheel_hz = get_parameter("wheel_fusion_hz").as_double();
+  const double nhc_hz = get_parameter("nhc_hz").as_double();
+  if (!(wheel_hz > 0.0) || !(nhc_hz > 0.0)) {
+    RCLCPP_ERROR(
+      get_logger(), "wheel_fusion_hz and nhc_hz must be positive, got %.3f and %.3f", wheel_hz,
+      nhc_hz);
+  } else {
+    hull_.set_update_hz(wheel_hz, nhc_hz);
+    RCLCPP_INFO(get_logger(), "wheel fusion %.3f Hz, nhc %.3f Hz", wheel_hz, nhc_hz);
+  }
   dive_on_bar_ = get_parameter("dive_on_bar").as_double();
   dive_off_bar_ = get_parameter("dive_off_bar").as_double();
   align_hold_sec_ = get_parameter("align_hold_sec").as_double();
@@ -63,6 +94,7 @@ NodeLocalizationV2::NodeLocalizationV2(const std::string & name)
   gyro_static_ = get_parameter("gyro_static").as_double();
   wheel_speed_zero_ = get_parameter("wheel_speed_zero").as_double();
   load_lever("lever_fog_to_rear_center", wheel_levers_.fog_to_rear);
+  hull_.set_fog_to_rear_fur(wheel_levers_.fog_to_rear);
   load_lever("lever_rear_to_motor_right", wheel_levers_.motor_right);
   load_lever("lever_rear_to_motor_left", wheel_levers_.motor_left);
   load_lever("lever_rear_to_motor_front", wheel_levers_.motor_front);
@@ -93,6 +125,14 @@ NodeLocalizationV2::NodeLocalizationV2(const std::string & name)
         const auto & small = msg->wheel_odometer;
         const WheelSpeed speed = wheel_odom_speed_.update(
           stamp_sec(msg->header.stamp), motor[0], motor[1], motor[2], small[0], small[1]);
+        if (speed.valid) {
+          RCLCPP_INFO(
+            get_logger(),
+            "motor wheel right=%.4f left=%.4f front=%.4f m/s small wheel right=%.4f left=%.4f m/s "
+            "dt=%.4f",
+            speed.motor_right_mps, speed.motor_left_mps, speed.motor_front_mps,
+            speed.small_right_mps, speed.small_left_mps, speed.dt_sec);
+        }
         if (!speed.valid || !have_fog_) {
           return;
         }
@@ -116,14 +156,6 @@ NodeLocalizationV2::NodeLocalizationV2(const std::string & name)
               msg->accelerator.x, msg->accelerator.y, msg->accelerator.z)) {
           return;
         }
-        const NavStatus nav = hull_.step(false);
-        if (!nav.solution_valid) {
-          return;
-        }
-        RCLCPP_INFO(
-          get_logger(),
-          "fusion ship p=(%.3f,%.3f,%.3f) llh=(%.7f,%.7f,%.3f)",
-          nav.p_s[0], nav.p_s[1], nav.p_s[2], nav.latitude_deg, nav.longitude_deg, nav.height_m);
       });
     RCLCPP_INFO(get_logger(), "subscribe %s (fog_topic)", fog_sub_->get_topic_name());
   }
@@ -201,9 +233,12 @@ void NodeLocalizationV2::on_set_position(
 
   ModeAOrigin origin;
   origin.valid = true;
-  origin.p_s[0] = request->position.x;
-  origin.p_s[1] = request->position.y;
-  origin.p_s[2] = request->position.z;
+  const double p_rfu[3] = {request->position.x, request->position.y, request->position.z};
+  double p_frd[3];
+  ship_rfu_to_frd(p_rfu, p_frd);
+  origin.p_s[0] = p_frd[0];
+  origin.p_s[1] = p_frd[1];
+  origin.p_s[2] = p_frd[2];
   origin.latitude_deg = 30.0;
   origin.longitude_deg = 114.0;
   origin.height_m = 0.0;
@@ -221,7 +256,7 @@ void NodeLocalizationV2::on_set_position(
   RCLCPP_INFO(
     get_logger(),
     "algo/set_position ship=(%.3f,%.3f,%.3f) llh=(%.1f,%.1f,%.1f) v=0 rpy=(%.3f,%.3f,%.3f)",
-    origin.p_s[0], origin.p_s[1], origin.p_s[2], origin.latitude_deg, origin.longitude_deg,
+    p_rfu[0], p_rfu[1], p_rfu[2], origin.latitude_deg, origin.longitude_deg,
     origin.height_m, origin.roll_deg, origin.pitch_deg, origin.yaw_deg);
 }
 
@@ -278,8 +313,12 @@ void NodeLocalizationV2::on_tick()
      << (have_pumpbox_ ? "pumpbox," : "")
      << (have_pushbox_ ? "pushbox," : "");
   if (status.solution_valid) {
-    os << " ps=(" << status.p_s[0] << "," << status.p_s[1] << "," << status.p_s[2] << ")"
-       << " vs=(" << status.v_s[0] << "," << status.v_s[1] << "," << status.v_s[2] << ")"
+    double p_rfu[3];
+    double v_rfu[3];
+    ship_frd_to_rfu(status.p_s, p_rfu);
+    ship_frd_to_rfu(status.v_s, v_rfu);
+    os << " ps=(" << p_rfu[0] << "," << p_rfu[1] << "," << p_rfu[2] << ")"
+       << " vs=(" << v_rfu[0] << "," << v_rfu[1] << "," << v_rfu[2] << ")"
        << " rpy_s=(" << status.roll_s_deg << "," << status.pitch_s_deg << "," << status.yaw_s_deg
        << ")"
        << " llh=(" << status.latitude_deg << "," << status.longitude_deg << "," << status.height_m
@@ -294,13 +333,17 @@ void NodeLocalizationV2::on_tick()
   if (!status.solution_valid) {
     return;
   }
+  double p_rfu[3];
+  double v_rfu[3];
+  ship_frd_to_rfu(status.p_s, p_rfu);
+  ship_frd_to_rfu(status.v_s, v_rfu);
   naiad_interfaces::msg::RobotOdometry odom;
   odom.header.stamp = now();
   odom.header.frame_id = "ship";
   odom.child_frame_id = "imu";
-  odom.pose.position.x = status.p_s[0];
-  odom.pose.position.y = status.p_s[1];
-  odom.pose.position.z = status.p_s[2];
+  odom.pose.position.x = p_rfu[0];
+  odom.pose.position.y = p_rfu[1];
+  odom.pose.position.z = p_rfu[2];
   odom.pose.euler.roll = static_cast<float>(status.roll_s_deg);
   odom.pose.euler.pitch = static_cast<float>(status.pitch_s_deg);
   odom.pose.euler.yaw = static_cast<float>(status.yaw_s_deg);
@@ -311,9 +354,9 @@ void NodeLocalizationV2::on_tick()
   for (int i = 0; i < 9; ++i) {
     odom.pose.dcm[i] = status.C_bs[i];
   }
-  odom.twist.linear.x = status.v_s[0];
-  odom.twist.linear.y = status.v_s[1];
-  odom.twist.linear.z = status.v_s[2];
+  odom.twist.linear.x = v_rfu[0];
+  odom.twist.linear.y = v_rfu[1];
+  odom.twist.linear.z = v_rfu[2];
   odom_pub_->publish(odom);
 }
 

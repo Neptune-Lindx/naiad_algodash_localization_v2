@@ -38,7 +38,7 @@ ros2 launch naiad_localization_v2 localization_v2.launch.py
 
 ## 设位
 
-节点起来并且已经收到 `fog/data` 之后，另开一个终端设初始位置。`position` 是大船坐标系下的初始位置，单位米。`orientation` 当前不用；姿态取最近一帧 `fog/data` 的 roll、pitch、yaw。没有 RTK 时，全局锚点固定为经度 114.0°、纬度 30.0°、高度 0，速度为 0。
+节点起来并且已经收到 `fog/data` 之后，另开一个终端设初始位置。`position` 是后轮中心在对外大船坐标下的位置，右 $x$、前 $y$、上 $z$，单位米。固定锚点经纬高也是后轮中心。`orientation` 当前不用；姿态取最近一帧 `fog/data` 的 roll、pitch、yaw。没有 RTK 时，全局锚点固定为经度 114.0°、纬度 30.0°、高度 0，速度为 0。
 
 ```sh
 cd /home/neptune-lindx/src/C/naiad_workspace

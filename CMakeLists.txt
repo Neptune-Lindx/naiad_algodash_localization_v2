@@ -59,6 +59,10 @@ if(WS_ROS)
   target_link_libraries(${NODE_LOCALIZATION_V2} ${library_name})
   ament_target_dependencies(${NODE_LOCALIZATION_V2} ${dependencies})
 
+  add_executable(test_odo tools/test_odo.cpp)
+  target_link_libraries(test_odo ${library_name})
+  ament_target_dependencies(test_odo ${dependencies})
+
   if(NAIAD_BUILD_INS_GNSS)
     add_subdirectory(src/ins-gnss)
   endif()
@@ -68,7 +72,7 @@ if(WS_ROS)
     LIBRARY DESTINATION lib
     RUNTIME DESTINATION bin
   )
-  install(TARGETS ${NODE_LOCALIZATION_V2}
+  install(TARGETS ${NODE_LOCALIZATION_V2} test_odo
     RUNTIME DESTINATION lib/${PROJECT_NAME}
   )
   install(DIRECTORY launch config

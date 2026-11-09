@@ -13,7 +13,13 @@ constexpr int kN = 20;
 constexpr int kM = 5;
 constexpr double kPi = 3.1415926535897932;
 constexpr double kDeg2Rad = kPi / 180.0;
-constexpr double kMeasVar = 0.1 * 0.1;
+constexpr double kMeasVarRear = 0.1 * 0.1;
+constexpr double kMeasVarSmall = 0.05 * 0.05;
+
+double meas_var(int meas)
+{
+  return meas == 3 ? kMeasVarSmall : kMeasVarRear;
+}
 
 void zero(double * a, int n)
 {
@@ -167,44 +173,50 @@ void body_velocity(const double * c_bs, const double * v_s, double * v_b)
   }
 }
 
-/// H 行主序 5×20。h_i = (1+s_i) v_b,x，v_b = C_s^b v^s。
+/// 一行轴中心观测。gain = 1+(s_a+s_b)/2，比例因子列各写 v_x/2。姿态三列为 0。
+void fill_axle_row(
+  double * h, double * jacobian, int row_index, int scale_a, int scale_b, const double * c_bs,
+  const double * v_b, const double * scale)
+{
+  const double gain = 1.0 + 0.5 * (scale[scale_a] + scale[scale_b]);
+  h[row_index] = gain * v_b[0];
+  double * row = jacobian + row_index * kN;
+  row[3] = gain * c_bs[0];
+  row[4] = gain * c_bs[1];
+  row[5] = gain * c_bs[2];
+  row[15 + scale_a] = 0.5 * v_b[0];
+  row[15 + scale_b] = 0.5 * v_b[0];
+}
+
+/// H 行主序 5×20。第 0 行是大轮轴中心（s_0 与 s_1），第 3 行是小轮轴中心（s_3 与 s_4）。
+/// 两行速度列形式相同。同一对比例因子两列都写 v_x/2。前轮、左轮和另一条小轮行保持 0。
 void wheel_observation(
   const double * c_bs, const double * v_s, const double * scale, double * h, double * jacobian)
 {
   double v_b[3];
   body_velocity(c_bs, v_s, v_b);
+  zero(h, kM);
   zero(jacobian, kM * kN);
-  for (int i = 0; i < kM; ++i) {
-    const double gain = 1.0 + scale[i];
-    h[i] = gain * v_b[0];
-    double * row = jacobian + i * kN;
-    row[1] = gain * (-v_b[2]);
-    row[2] = gain * v_b[1];
-    row[3] = gain * c_bs[0];
-    row[4] = gain * c_bs[1];
-    row[5] = gain * c_bs[2];
-    row[15 + i] = v_b[0];
-  }
+  fill_axle_row(h, jacobian, 0, 0, 1, c_bs, v_b, scale);
+  fill_axle_row(h, jacobian, 3, 3, 4, c_bs, v_b, scale);
 }
 
-constexpr double kWheelPeriodSec = 0.5;
-constexpr double kNhcPeriodSec = 1.0;
-constexpr double kNhcVelGate = 0.3;
-constexpr double kNhcRateGate = 20.0 * kDeg2Rad;
-constexpr double kNhcVarY = 0.2 * 0.2;
+constexpr double kNhcVarY = 0.02 * 0.02;
 constexpr double kNhcVarZ = 0.3 * 0.3;
 
-/// 模式 A 的一条 NHC。axis 为 1（侧向）或 2（法向）。预测是 v_b 的该分量，量测为 0。
-void nhc_row(const double * c_bs, const double * v_b, int axis, double * row, double * prediction)
+/// 模式 A 的一条 NHC。axis 为 1（侧向，后轮中心）或 2（法向，IMU）。量测为 0。
+/// 两行姿态三列都是 0，只改对应的速度。侧向预测是 e_y·(v_imu + ω×l)，零偏列是 [l×] 的右向行。
+void nhc_row(
+  const double * c_bs, const double * v_b, int axis, const double * omega_b,
+  const double * lever_frd, double * row, double * prediction)
 {
   zero(row, kN);
   *prediction = v_b[axis];
   if (axis == 1) {
-    row[0] = v_b[2];
-    row[2] = -v_b[0];
-  } else {
-    row[0] = -v_b[1];
-    row[1] = v_b[0];
+    const double wxr_y = omega_b[2] * lever_frd[0] - omega_b[0] * lever_frd[2];
+    *prediction += wxr_y;
+    row[12] = lever_frd[2];
+    row[14] = -lever_frd[0];
   }
   row[3] = c_bs[3 * axis];
   row[4] = c_bs[1 + 3 * axis];
@@ -240,6 +252,12 @@ void HullFusion::set_wheel_aiding(bool enabled)
     reset_error_covariance();
   }
   wheel_aiding_ = enabled;
+}
+
+void HullFusion::set_update_hz(double wheel_hz, double nhc_hz)
+{
+  wheel_period_sec_ = 1.0 / wheel_hz;
+  nhc_period_sec_ = 1.0 / nhc_hz;
 }
 
 void HullFusion::propagate_error(double dt, const double * f_b)
@@ -331,7 +349,8 @@ bool HullFusion::update_wheels(double t_sec, const WheelSpeedAtFog & speed)
     wheel_sec_ = t_sec;
     return false;
   }
-  if (t_sec < wheel_sec_ + kWheelPeriodSec) {
+  // 周期来自 wheel_fusion_hz。留 1 ms，避免时间戳的舍入把整拍丢掉。
+  if (t_sec < wheel_sec_ + wheel_period_sec_ - 1e-3) {
     return false;
   }
   wheel_sec_ = t_sec;
@@ -342,12 +361,11 @@ bool HullFusion::update_wheels(double t_sec, const WheelSpeedAtFog & speed)
   double v_s[3];
   mul_vec3(c_se_t, ve_, v_s);
 
-  const double z[kM] = {
-    speed.motor_right[0], speed.motor_left[0], speed.motor_front[0], speed.small_right[0],
-    speed.small_left[0]};
   double h[kM];
   double jacobian[kM * kN];
   wheel_observation(c_bs, v_s, scale_, h, jacobian);
+  // 第 0 行是大轮轴中心，第 3 行是小轮轴中心。量测都已是左右平均并补到 IMU 后的前向速度。
+  double z[kM] = {speed.motor_right[0], 0.0, 0.0, speed.small_right[0], 0.0};
 
   double pht[kN * kM];
   for (int meas = 0; meas < kM; ++meas) {
@@ -362,7 +380,7 @@ bool HullFusion::update_wheels(double t_sec, const WheelSpeedAtFog & speed)
   double innov_cov[kM * kM];
   for (int row = 0; row < kM; ++row) {
     for (int col = 0; col < kM; ++col) {
-      double sum = row == col ? kMeasVar : 0.0;
+      double sum = row == col ? meas_var(row) : 0.0;
       for (int k = 0; k < kN; ++k) {
         sum += jacobian[row * kN + k] * pht[k + kN * col];
       }
@@ -411,7 +429,7 @@ bool HullFusion::update_wheels(double t_sec, const WheelSpeedAtFog & speed)
     for (int row = 0; row < kN; ++row) {
       double extra = 0.0;
       for (int meas = 0; meas < kM; ++meas) {
-        extra += gain[row + kN * meas] * kMeasVar * gain[col + kN * meas];
+        extra += gain[row + kN * meas] * meas_var(meas) * gain[col + kN * meas];
       }
       P_[row + kN * col] += extra;
     }
@@ -482,7 +500,7 @@ bool HullFusion::apply_scalar_update(
   return true;
 }
 
-void HullFusion::update_nhc(double t_sec, const double * omega_b)
+void HullFusion::update_nhc(double t_sec, const double * omega_b, const double * lever_frd)
 {
   if (!armed_ || !wheel_aiding_) {
     return;
@@ -491,16 +509,11 @@ void HullFusion::update_nhc(double t_sec, const double * omega_b)
     nhc_sec_ = t_sec;
     return;
   }
-  if (t_sec < nhc_sec_ + kNhcPeriodSec) {
+  // 周期来自 nhc_hz。留 1 ms，避免时间戳的舍入把整拍丢掉。
+  if (t_sec < nhc_sec_ + nhc_period_sec_ - 1e-3) {
     return;
   }
   nhc_sec_ = t_sec;
-
-  const double rate = std::sqrt(
-    omega_b[0] * omega_b[0] + omega_b[1] * omega_b[1] + omega_b[2] * omega_b[2]);
-  if (rate > kNhcRateGate) {
-    return;
-  }
 
   const int axes[2] = {1, 2};
   const double variance[2] = {kNhcVarY, kNhcVarZ};
@@ -514,12 +527,9 @@ void HullFusion::update_nhc(double t_sec, const double * omega_b)
     mul_vec3(c_se_t, ve_, v_s);
     body_velocity(c_bs, v_s, v_b);
     const int axis = axes[i];
-    if (std::fabs(v_b[axis]) > kNhcVelGate) {
-      continue;
-    }
     double row[kN];
     double prediction = 0.0;
-    nhc_row(c_bs, v_b, axis, row, &prediction);
+    nhc_row(c_bs, v_b, axis, omega_b, lever_frd, row, &prediction);
     apply_scalar_update(row, prediction, 0.0, variance[i]);
   }
 }
@@ -533,24 +543,37 @@ bool HullFusion::wheel_observation_holds()
   double jacobian[kM * kN];
   wheel_observation(c_bs, v_s, scale0, h0, jacobian);
 
-  for (int col = 0; col < 15; ++col) {
-    for (int row = 1; row < kM; ++row) {
-      if (std::fabs(jacobian[row * kN + col] - jacobian[col]) > 1e-12) {
+  const int silent[3] = {1, 2, 4};
+  for (int row : silent) {
+    if (std::fabs(h0[row]) > 1e-12) {
+      return false;
+    }
+    for (int col = 0; col < kN; ++col) {
+      if (std::fabs(jacobian[row * kN + col]) > 1e-12) {
         return false;
       }
     }
   }
-  for (int row = 0; row < kM; ++row) {
-    for (int col = 0; col < kM; ++col) {
-      const double expect = row == col ? v_s[0] : 0.0;
-      if (std::fabs(jacobian[row * kN + 15 + col] - expect) > 1e-12) {
-        return false;
-      }
-    }
+  const int axles[2] = {0, 3};
+  for (int row : axles) {
     for (int col = 6; col < 15; ++col) {
       if (std::fabs(jacobian[row * kN + col]) > 1e-12) {
         return false;
       }
+    }
+    if (std::fabs(h0[row] - v_s[0]) > 1e-12) {
+      return false;
+    }
+  }
+  const double half = 0.5 * v_s[0];
+  for (int col = 0; col < kM; ++col) {
+    const double rear = (col == 0 || col == 1) ? half : 0.0;
+    const double small = (col == 3 || col == 4) ? half : 0.0;
+    if (std::fabs(jacobian[15 + col] - rear) > 1e-12) {
+      return false;
+    }
+    if (std::fabs(jacobian[3 * kN + 15 + col] - small) > 1e-12) {
+      return false;
     }
   }
 
@@ -561,41 +584,46 @@ bool HullFusion::wheel_observation_holds()
     double h_step[kM];
     double unused[kM * kN];
     wheel_observation(c_bs, v_step, scale0, h_step, unused);
-    const double numeric = (h_step[0] - h0[0]) / eps;
-    if (std::fabs(numeric - jacobian[3 + axis]) > 1e-6) {
-      return false;
-    }
-    double dphi[3] = {0.0, 0.0, 0.0};
-    dphi[axis] = eps;
-    double c_step[9];
-    right_perturb(c_bs, dphi, c_step);
-    wheel_observation(c_step, v_s, scale0, h_step, unused);
-    const double att = (h_step[0] - h0[0]) / eps;
-    if (std::fabs(att - jacobian[axis]) > 1e-6) {
-      return false;
+    for (int row : axles) {
+      const double numeric = (h_step[row] - h0[row]) / eps;
+      if (std::fabs(numeric - jacobian[row * kN + 3 + axis]) > 1e-6) {
+        return false;
+      }
+      if (std::fabs(jacobian[row * kN + axis]) > 1e-12) {
+        return false;
+      }
+      if (std::fabs(jacobian[row * kN + 3 + axis] - jacobian[3 + axis]) > 1e-12) {
+        return false;
+      }
     }
   }
 
   const double scale[5] = {0.1, -0.2, 0.0, 0.3, -0.1};
+  const double gain_rear = 1.0 + 0.5 * (scale[0] + scale[1]);
+  const double gain_small = 1.0 + 0.5 * (scale[3] + scale[4]);
+  const double gain_axle[2] = {gain_rear, gain_small};
   double h_scaled[kM];
   double scaled[kM * kN];
   wheel_observation(c_bs, v_s, scale, h_scaled, scaled);
-  for (int row = 0; row < kM; ++row) {
-    const double gain = 1.0 + scale[row];
-    if (std::fabs(h_scaled[row] - gain * v_s[0]) > 1e-12) {
+  for (int i = 0; i < 2; ++i) {
+    const int row = axles[i];
+    if (std::fabs(h_scaled[row] - gain_axle[i] * v_s[0]) > 1e-12) {
       return false;
     }
     for (int col = 0; col < 15; ++col) {
-      const double base = std::fabs(gain) > 1e-12 ? jacobian[col] : 0.0;
-      if (std::fabs(scaled[row * kN + col] - gain * base) > 1e-9) {
+      if (std::fabs(scaled[row * kN + col] - gain_axle[i] * jacobian[row * kN + col]) > 1e-9) {
         return false;
       }
     }
     for (int col = 0; col < kM; ++col) {
-      const double expect = row == col ? v_s[0] : 0.0;
-      if (std::fabs(scaled[row * kN + 15 + col] - expect) > 1e-12) {
+      if (std::fabs(scaled[row * kN + 15 + col] - jacobian[row * kN + 15 + col]) > 1e-12) {
         return false;
       }
+    }
+  }
+  for (int row : silent) {
+    if (std::fabs(h_scaled[row]) > 1e-12) {
+      return false;
     }
   }
   return true;
@@ -605,13 +633,15 @@ bool HullFusion::nhc_observation_holds()
 {
   const double c_bs[9] = {1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0};
   const double v_s[3] = {1.0, 2.0, 3.0};
+  const double omega0[3] = {0.0, 0.0, 0.0};
+  const double lever0[3] = {0.0, 0.0, 0.0};
   double v_b[3];
   body_velocity(c_bs, v_s, v_b);
   const double eps = 1e-6;
   for (int axis = 1; axis <= 2; ++axis) {
     double row[kN];
     double prediction = 0.0;
-    nhc_row(c_bs, v_b, axis, row, &prediction);
+    nhc_row(c_bs, v_b, axis, omega0, lever0, row, &prediction);
     if (std::fabs(prediction - v_b[axis]) > 1e-12) {
       return false;
     }
@@ -633,17 +663,11 @@ bool HullFusion::nhc_observation_holds()
       body_velocity(c_bs, v_step, v_step_b);
       double row_step[kN];
       double pred_step = 0.0;
-      nhc_row(c_bs, v_step_b, axis, row_step, &pred_step);
+      nhc_row(c_bs, v_step_b, axis, omega0, lever0, row_step, &pred_step);
       if (std::fabs((pred_step - prediction) / eps - row[3 + col]) > 1e-6) {
         return false;
       }
-      double dphi[3] = {0.0, 0.0, 0.0};
-      dphi[col] = eps;
-      double c_step[9];
-      right_perturb(c_bs, dphi, c_step);
-      body_velocity(c_step, v_s, v_step_b);
-      nhc_row(c_step, v_step_b, axis, row_step, &pred_step);
-      if (std::fabs((pred_step - prediction) / eps - row[col]) > 1e-6) {
+      if (std::fabs(row[col]) > 1e-12) {
         return false;
       }
     }
@@ -654,7 +678,7 @@ bool HullFusion::nhc_observation_holds()
   for (int axis = 1; axis <= 2; ++axis) {
     double row[kN];
     double prediction = 0.0;
-    nhc_row(rolled, v_b, axis, row, &prediction);
+    nhc_row(rolled, v_b, axis, omega0, lever0, row, &prediction);
     for (int col = 0; col < 3; ++col) {
       double v_step[3] = {v_s[0], v_s[1], v_s[2]};
       v_step[col] += eps;
@@ -662,19 +686,67 @@ bool HullFusion::nhc_observation_holds()
       body_velocity(rolled, v_step, v_step_b);
       double row_step[kN];
       double pred_step = 0.0;
-      nhc_row(rolled, v_step_b, axis, row_step, &pred_step);
+      nhc_row(rolled, v_step_b, axis, omega0, lever0, row_step, &pred_step);
       if (std::fabs((pred_step - prediction) / eps - row[3 + col]) > 1e-6) {
         return false;
       }
-      double dphi[3] = {0.0, 0.0, 0.0};
-      dphi[col] = eps;
-      double c_step[9];
-      right_perturb(rolled, dphi, c_step);
-      body_velocity(c_step, v_s, v_step_b);
-      nhc_row(c_step, v_step_b, axis, row_step, &pred_step);
-      if (std::fabs((pred_step - prediction) / eps - row[col]) > 1e-6) {
+      if (std::fabs(row[col]) > 1e-12) {
         return false;
       }
+    }
+  }
+
+  body_velocity(c_bs, v_s, v_b);
+  const double omega[3] = {0.1, -0.2, 0.3};
+  const double lever[3] = {0.2, 0.0, -0.1};
+  double row_lat[kN];
+  double pred_lat = 0.0;
+  nhc_row(c_bs, v_b, 1, omega, lever, row_lat, &pred_lat);
+  const double wxr_y = omega[2] * lever[0] - omega[0] * lever[2];
+  if (std::fabs(pred_lat - (v_b[1] + wxr_y)) > 1e-12) {
+    return false;
+  }
+  for (int col = 0; col < 3; ++col) {
+    if (std::fabs(row_lat[col]) > 1e-12) {
+      return false;
+    }
+  }
+  const double expect_bg[3] = {lever[2], 0.0, -lever[0]};
+  for (int col = 0; col < 3; ++col) {
+    if (std::fabs(row_lat[12 + col] - expect_bg[col]) > 1e-12) {
+      return false;
+    }
+    double omega_step[3] = {omega[0], omega[1], omega[2]};
+    omega_step[col] += eps;
+    double row_step[kN];
+    double pred_step = 0.0;
+    nhc_row(c_bs, v_b, 1, omega_step, lever, row_step, &pred_step);
+    const double numeric = (pred_step - pred_lat) / eps;
+    const double analytic =
+      col == 0 ? -lever[2] : (col == 2 ? lever[0] : 0.0);
+    if (std::fabs(numeric - analytic) > 1e-6) {
+      return false;
+    }
+  }
+  for (int col = 6; col < 12; ++col) {
+    if (std::fabs(row_lat[col]) > 1e-12) {
+      return false;
+    }
+  }
+  for (int col = 15; col < kN; ++col) {
+    if (std::fabs(row_lat[col]) > 1e-12) {
+      return false;
+    }
+  }
+  double row_nor[kN];
+  double pred_nor = 0.0;
+  nhc_row(c_bs, v_b, 2, omega, lever, row_nor, &pred_nor);
+  if (std::fabs(pred_nor - v_b[2]) > 1e-12) {
+    return false;
+  }
+  for (int col = 12; col < 15; ++col) {
+    if (std::fabs(row_nor[col]) > 1e-12) {
+      return false;
     }
   }
   return true;

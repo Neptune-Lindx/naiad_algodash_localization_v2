@@ -39,6 +39,13 @@ void project_one(
   body[2] = -wxr[2];
 }
 
+void midpoint(const double * a, const double * b, double * mid)
+{
+  mid[0] = 0.5 * (a[0] + b[0]);
+  mid[1] = 0.5 * (a[1] + b[1]);
+  mid[2] = 0.5 * (a[2] + b[2]);
+}
+
 }  // namespace
 
 // 轮速计算用的两帧时间差，单位秒。按 50 Hz 固定，后期可迁到 yaml。
@@ -98,11 +105,14 @@ WheelSpeedAtFog project_wheel_speed_to_fog(
   const double gyro_fur[3] = {gyro_x, gyro_y, gyro_z};
   double gyro[3];
   fur_to_frd(gyro_fur, gyro);
-  project_one(speed.motor_right_mps, levers.fog_to_rear, levers.motor_right, gyro, out.motor_right);
-  project_one(speed.motor_left_mps, levers.fog_to_rear, levers.motor_left, gyro, out.motor_left);
-  project_one(speed.motor_front_mps, levers.fog_to_rear, levers.motor_front, gyro, out.motor_front);
-  project_one(speed.small_right_mps, levers.fog_to_rear, levers.small_right, gyro, out.small_right);
-  project_one(speed.small_left_mps, levers.fog_to_rear, levers.small_left, gyro, out.small_left);
+  double rear_mid[3];
+  double small_mid[3];
+  midpoint(levers.motor_right, levers.motor_left, rear_mid);
+  midpoint(levers.small_right, levers.small_left, small_mid);
+  const double v_rear = 0.5 * (speed.motor_right_mps + speed.motor_left_mps);
+  const double v_small = 0.5 * (speed.small_right_mps + speed.small_left_mps);
+  project_one(v_rear, levers.fog_to_rear, rear_mid, gyro, out.motor_right);
+  project_one(v_small, levers.fog_to_rear, small_mid, gyro, out.small_right);
   out.valid = true;
   return out;
 }

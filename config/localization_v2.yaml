@@ -1,6 +1,11 @@
 naiad_localization_v2:
   ros__parameters:
     schedule_period_ms: 20
+    # 大轮和小轮卡尔曼更新频率，单位 Hz。轮速消息仍按 50 Hz 差分，这里只决定多久融合一次。
+    # launch 读的是安装目录 share/naiad_localization_v2/config/localization_v2.yaml。改源文件后要重新安装再启动。
+    wheel_fusion_hz: 10.0
+    # 侧向和法向非完整性约束的更新频率，单位 Hz。与 IMU 同拍时填 100。
+    nhc_hz: 10.0
     # 压力计，单位 bar。高于 dive_on 进水下，低于 dive_off 出水面。需要按实船标定。
     dive_on_bar: 1.20
     dive_off_bar: 1.12

@@ -30,10 +30,32 @@
 | 系 | 符号 | 含义 |
 |--|--|--|
 | $e$ | ECEF | 壁虎组合导航位置、清洁机器人 RTK、现有 `ins->re` |
-| $s$ | 船体 | 原点取**壁虎小车 / 船参考点**；$x$ 艏向，$y$ 右舷，$z$ 向下（实现时可按安装改） |
-| $b$ | 清洁机器人 IMU | $x$ 前进，$y$ 沿壁面侧向，$z$ 指向壁面（法向） |
+| $s$ | 船体，算法内部 | 原点取**壁虎小车 / 船参考点**。本版取前 $x$、右 $y$、下 $z$。艏向冻结指北时与北东地重合 |
+| $b$ | 清洁机器人 IMU，算法内部 | 前 $x$、右 $y$、下 $z$。话题 `fog/data` 是前 $x$、上 $y$、右 $z$，进入算法前换成前右下 |
 | $r$ | 轮速系 | 默认与 $b$ 重合，杆臂 $l_{br}$ 同现有 `ins->rbl` |
 | $g$ | 壁虎 IMU | 模式 B 中与 $s$ 固连，安装角另标定 |
+| 输出 | 对外大船坐标 | 右 $x$、前 $y$、上 $z$。只用于 `localization_v2/odometry` 的位置和线速度、`algo/set_position` 的 `position`、控制台 `fusion ship p` |
+
+滤波、轮速和 NHC 都留在算法船体系里，不改状态定义。贴壁法向是几何量，不是本版算法的 $z$ 轴；侧贴横滚约 $90^\circ$ 时，机体系右向才接近地理向下。
+
+对外位置、速度与算法船体系的关系：
+
+$$
+p_x^{\mathrm{out}}=p_y^s,\qquad
+p_y^{\mathrm{out}}=p_x^s,\qquad
+p_z^{\mathrm{out}}=-p_z^s
+$$
+
+速度同样。因此沿船艏前进时，对外的 $y$ 增加；向右舷运动时，对外的 $x$ 增加；向上时对外的 $z$ 增加。姿态的欧拉角、四元数和方向余弦仍是算法机体系相对算法船体系，没有改成右前上。
+
+对外的大船位置和经纬高都是**后轮中心**，不是 IMU。杆臂 `lever_fog_to_rear_center` 写在配置里，轴是话题的前、上、右，向量从 FOG 指向后轮中心。算法里先换成前右下 $l^b$，再
+
+$$
+p_{\mathrm{rear}}^s = p_{\mathrm{imu}}^s + C_b^s l^b,\qquad
+r_{\mathrm{rear}}^e = r_{\mathrm{imu}}^e + C_b^e l^b
+$$
+
+$p^{\mathrm{out}}$ 由 $p_{\mathrm{rear}}^s$ 按上一组式子换成右前上。经纬高由 $r_{\mathrm{rear}}^e$ 反算。积分状态、轮速和 NHC 仍在 IMU 上。`algo/set_position` 的 position 和固定锚点经纬高也是后轮中心；N1 这份配置里该杆臂是 0，FOG 与后轮中心重合。
 
 相对位姿（要估的量）：
 
@@ -547,20 +569,38 @@ $H$ 对 $\delta v^s,\delta\phi,\delta b_g,\delta s,\delta l$ 的结构与 `jacob
 
 **模式 A 五轮实现（本版已接入）**
 
-五个轮速先按杆臂和角速度折到 FOG，再换成算法机体系前-右-下。杆臂项留在这一步，不进 $H$。观测只用折算后的前向分量，是五维向量：
+本版融合左右大轮和左右小轮，前轮不融合。每一对都是左右先平均，再用该对轮心中点到 IMU 的杆臂补到 FOG。角速度用话题陀螺，先从前-上-右换成前-右-下。杆臂是配置里的前-上-右：先取 fog 到后轮中心，再加上这一对 `rear_to_wheel` 的中点，然后换成前-右-下。杆臂只留在量测里，不进 $H$：
 
 $$
-z_i=v_{\mathrm{fog},x,i},\qquad
-\hat z_i=(1+s_i)\,v_{\mathrm{rel},x}^b,\qquad
+v_{\mathrm{axle}}=\frac{v_r+v_l}{2},\qquad
+l^b=l_{\mathrm{fog}\rightarrow\mathrm{rear}}^b+\frac{l_r^b+l_l^b}{2}
+$$
+
+$$
+v_{\mathrm{fog}}^b=(v_{\mathrm{axle}},\,0,\,0)-\omega^b\times l^b
+$$
+
+N1 上后轮轴中心与 FOG 重合，平均后的杆臂是 0。小轮中点在前-上-右 $(0,-0.075,0)$，前-右-下为 $(0,0,0.075)$。大轮和小轮这两条都送进滤波，前轮不融合。
+
+观测向量仍是五维。第 0 行是大轮轴中心，第 3 行是小轮轴中心。左轮、前轮和另一条小轮行的 $H$ 与新息都是 0：
+
+$$
+z_0=v_{\mathrm{fog},x}^{\mathrm{rear}},\qquad
+z_3=v_{\mathrm{fog},x}^{\mathrm{small}},\qquad
+\hat z_0=\Bigl(1+\frac{s_0+s_1}{2}\Bigr)\,v_{\mathrm{rel},x}^b,\qquad
+\hat z_3=\Bigl(1+\frac{s_3+s_4}{2}\Bigr)\,v_{\mathrm{rel},x}^b
+$$
+
+$$
 v_{\mathrm{rel}}^b=C_s^b v^s,\qquad
 \nu=z-\hat z
 $$
 
-$i$ 的顺序仍是大轮右、左、前，小轮右、左。$R=(0.1\,\mathrm{m/s})^2 I_5$。里程仍按 50 Hz 把相邻帧差分成速度，滤波只用最新的这一组速度，每 0.5 s 更新一次（2 Hz），不做 0.5 s 平均。更新是 $x\leftarrow x+K(z-\hat z)$，$H=\partial\hat z/\partial x$，与 `rtkcmn.cc` 里 `filter()` 的 $v=$ 量测减预测、$x+Kv$ 同号。非完整性约束仍是 1 Hz，见第 5.2 节。
+状态仍是 20 维，下标不变：大轮右、左、前，小轮右、左。前轮比例因子留着但没有观测。大轮 $R=(0.1\,\mathrm{m/s})^2$，小轮 $R=(0.05\,\mathrm{m/s})^2$。里程仍按 50 Hz 把相邻帧差分成速度，滤波只用最新的这一组速度，不做平均。融合频率由 `config/localization_v2.yaml` 的 `wheel_fusion_hz` 决定，当前是 50 Hz。更新是 $x\leftarrow x+K(z-\hat z)$，$H=\partial\hat z/\partial x$，与 `rtkcmn.cc` 里 `filter()` 的 $v=$ 量测减预测、$x+Kv$ 同号。非完整性约束见第 5.2 节，频率由 `nhc_hz` 决定，当前是 100 Hz。
 
-$H$ 为 $5\times 20$。位置、加表零偏、陀螺零偏列为 0。速度列是 $(1+s_i)\,e_x^{\mathrm{T}}C_s^b$。姿态列是 $(1+s_i)\,(0,\,-v_z^b,\,v_y^b)$，其中 $v^b=C_s^b v^s$，对应 $C_b^s$ 右扰动 $C_b^s\leftarrow C_b^s(I+[\delta\phi\times])$。五个比例因子列是对角阵，第 $i$ 行只有第 $i$ 个为 $v_{\mathrm{rel},x}^b$。$s_i=0$ 时前 15 列五行完全相同；$s_i$ 不同时，把速度列和姿态列除以 $(1+s_i)$ 后仍相同。比例因子列必须对角，五个 $s_i$ 才能分开。
+$H$ 为 $5\times 20$。位置、加表零偏、陀螺零偏列为 0。两行的速度列都是 $(1+\bar s)\,e_x^{\mathrm{T}}C_s^b$，比例因子为 0 时这两行速度列相同。姿态三列本版写成 0，轮速不改航向，左右轮差速也不做航向修正。大轮 $\bar s=(s_0+s_1)/2$，小轮 $\bar s=(s_3+s_4)/2$。大轮比例因子列在第 15、16 列各写 $v_x/2$，小轮在第 18、19 列也各写同一个 $v_x/2$，这个 $v_x/2$ 不再乘 $(1+\bar s)$。其余三行整行是 0。
 
-闭环后误差清零：$\delta\phi^b$ 右乘 $C_b^e$（$C_s^e$ 冻结时即改 $C_b^s$），$\delta v^s,\delta p^s$ 经 $C_s^e$ 加进 $v^e,r^e$，零偏和比例因子累加到估计值。贴壁平面、艏向和 ZVU 本版不进这次更新。模式 A 的 NHC 见第 5.2 节，在轮速更新之外按 1 Hz 单独做。模式 B 仍沿用上面的单轴公式，五轮 $H$ 尚未接入。
+闭环后误差清零：$\delta\phi^b$ 右乘 $C_b^e$（$C_s^e$ 冻结时即改 $C_b^s$），$\delta v^s,\delta p^s$ 经 $C_s^e$ 加进 $v^e,r^e$，零偏和比例因子累加到估计值。贴壁平面、艏向和 ZVU 本版不进这次更新。模式 A 的 NHC 见第 5.2 节，在轮速更新之外按 `nhc_hz` 单独做，当前是 100 Hz。模式 B 仍沿用上面的单轴公式，五轮 $H$ 尚未接入。
 
 ### 5.2 非完整性约束 NHC
 
@@ -570,7 +610,7 @@ $$
 v_{\mathrm{rel},y}^b = 0,\qquad v_{\mathrm{rel},z}^b = 0
 $$
 
-这是两条 **虚速度观测**。新息：
+这是两条 **虚速度观测**。本版侧向是后轮中心的机体系右向速度，法向仍是 IMU 点的机体系下向速度。新息：
 
 $$
 z_{\mathrm{NHC}}
@@ -613,23 +653,28 @@ $$
 
 陆地门槛是 $0.5\,\mathrm{m/s}$；侧壁更严。真实侧滑/掉磁时硬拉会毁轨迹。模式 A：法向 NHC 的 $R$ 放到 $0.2\sim 0.5\,\mathrm{m/s}$，避免把横摇泄漏当成离壁。
 
+本版模式 A 代码里，速度门 $|v_{\mathrm{rel},i}^b|>0.3\,\mathrm{m/s}$ 和角速度门 $\lVert\omega_{ib}^b\rVert>20^\circ/\mathrm{s}$ 都已屏蔽。上面的门槛留作设计，当前不执行。
+
 **频率**：与现工程相同，**不要跟 IMU 同频**。`nhz` 按拍数降频：100 Hz IMU 用 `nhz=10`～`20`（约 5–10 Hz）或 `nhz=100`（约 1 Hz）。FOG 用 1 Hz 足够；侧壁微振可 5–10 Hz。同频且 $R$ 仍 $0.05^2$ 会过约束（虚测量时间相关）。
 
 陆地 NHC 默认约 1 Hz（`ins-hz=100`、`ins-nhz=100`）。壁虎也是 1 Hz 时，**NHC 对齐壁虎包（约 1 Hz）最合适**，不要为 1 Hz 母体再把 NHC 加到 10 Hz。
 
 **模式 A 实现（本版已接入）**
 
-每个 IMU 步做完捷联后检查，间隔满 1 s 才更新一次，不跟 100 Hz 同拍。模式 A 的 $\omega_{is}^s=0$，所以 $H_p=0$，也不做 $\omega\times p$。预测取机体系侧向和法向速度，量测是 0：
+每个 IMU 步做完捷联后，侧向和法向按 `nhc_hz` 一起更新，当前是 100 Hz。模式 A 的 $\omega_{is}^s=0$，所以 $H_p=0$，也不做 $\omega\times p$。量测是 0。侧向预测用后轮中心速度，法向预测仍用 IMU 速度：
 
 $$
-h=\begin{bmatrix} v_{\mathrm{rel},y}^b \\ v_{\mathrm{rel},z}^b \end{bmatrix},\qquad
-z=\begin{bmatrix} 0 \\ 0 \end{bmatrix},\qquad
+h_y=e_y^{\mathrm{T}}(v_{\mathrm{imu}}^b+\omega^b\times l^b),\qquad
+h_z=v_{\mathrm{imu},z}^b,\qquad
+z=0,\qquad
 \nu=z-h
 $$
 
-两轴序贯更新，仍是 $x\leftarrow x+K\nu$，$H=\partial h/\partial x$。速度列就是 $e_2^{\mathrm{T}}C_s^b$、$e_3^{\mathrm{T}}C_s^b$。姿态列用和轮速相同的右扰动：$y$ 行是 $(v_z^b,\,0,\,-v_x^b)$，$z$ 行是 $(-v_y^b,\,v_x^b,\,0)$。位置、零偏、五个比例因子列为 0。
+$l^b$ 是 FOG 到后轮中心，配置为前-上-右，用前换成前-右-下。$\omega^b$ 是已经减过陀螺零偏的机体系角速度。$l^b=0$ 时侧向与直接约束 IMU 相同。
 
-侧向 $R=(0.2\,\mathrm{m/s})^2$，法向 $R=(0.3\,\mathrm{m/s})^2$。$|v_{\mathrm{rel},i}^b|>0.3\,\mathrm{m/s}$ 的那一轴跳过；$\lVert\omega_{ib}^b\rVert>20^\circ/\mathrm{s}$ 时两轴都跳过。`SurfaceTight` 时和轮速一起停。贴壁几何、ZVU 仍不在这次更新里。
+两轴序贯更新，仍是 $x\leftarrow x+K\nu$。速度列就是 $e_2^{\mathrm{T}}C_s^b$、$e_3^{\mathrm{T}}C_s^b$，只对 $v_{\mathrm{imu}}^b$ 求导。侧向和法向的姿态三列本版都写成 0，只拉速度，不改航向和纵摇。$\omega^b$ 和 $l^b$ 都在机体系，姿态误差不进 $\omega\times l$。反馈把修正加进陀螺零偏，所以侧向对 $\delta b_g$ 的列是 $[l^b\times]$ 的右向行 $(l_z,\,0,\,-l_x)$。法向的陀螺零偏列仍是 0。位置、加表零偏、五个比例因子列为 0。
+
+侧向 $R=(0.02\,\mathrm{m/s})^2$，法向 $R=(0.3\,\mathrm{m/s})^2$。$|v_{\mathrm{rel},i}^b|>0.3\,\mathrm{m/s}$ 跳过该轴、以及补偿陀螺零偏后 $\lVert\omega_{ib}^b\rVert>20^\circ/\mathrm{s}$ 两轴都跳过，这两道门本版已屏蔽。后轮中心右向速度和 IMU 下向速度按 `nhc_hz` 更新，当前是每 0.01 s。`SurfaceTight` 时和轮速一起停。贴壁几何、ZVU 仍不在这次更新里。
 
 ### 5.3 法向几何的卡尔曼修正
 
