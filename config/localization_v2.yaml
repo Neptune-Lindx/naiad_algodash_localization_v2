@@ -6,6 +6,10 @@ naiad_localization_v2:
     wheel_fusion_hz: 10.0
     # 侧向和法向非完整性约束的更新频率，单位 Hz。与 IMU 同拍时填 100。
     nhc_hz: 10.0
+    # 轮速 IGG3。标准化残差 |ν|/sqrt(HPH+R) 不超过 k0 时 R 不变，超过 k1 时该轮方差乘 1e6。
+    # 比 RTK 的 2.5 / 8 松。只作用在四个轮速观测上。
+    wheel_igg3_k0: 5.0
+    wheel_igg3_k1: 15.0
     # 压力计，单位 bar。高于 dive_on 进水下，低于 dive_off 出水面。需要按实船标定。
     dive_on_bar: 1.20
     dive_off_bar: 1.12

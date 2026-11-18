@@ -506,9 +506,11 @@ $$
 \delta\dot{v}_A^s \approx (C_s^e)^{\mathrm{T}}\delta v_b^e + w_{\mathrm{ship}}
 $$
 
-$w_{\mathrm{ship}}$ 是船加速度 $a_{\mathrm{ship}}^e$ 无法从 $v_b^e$ 减去、投影进 $\hat{v}_A^s$ 的项（横摇/纵荡），须加大 $Q_v$。本版速度过程噪声取 $0.05\,\mathrm{m/s}^2$（已盖住传感器约 $0.01\,\mathrm{m/s}^2$ 的白噪声）。陀螺角随机游走取仿真 FOG 的 $0.01^\circ/\sqrt{\mathrm{h}}$。加表零偏、陀螺零偏、比例因子用小随机游走，功率谱密度分别为 $10^{-8}\,(\mathrm{m/s}^2)^2/\mathrm{s}$、$10^{-12}\,(\mathrm{rad/s})^2/\mathrm{s}$、$10^{-8}/\mathrm{s}$。离散传播取 $\Phi\approx I+F\Delta t$，每个 IMU 步做 $P\leftarrow\Phi P\Phi^{\mathrm{T}}+Q$。对角过程噪声是上述功率谱密度乘 $\Delta t$；姿态通道用角随机游走的平方乘 $\Delta t$。
+$w_{\mathrm{ship}}$ 是船加速度 $a_{\mathrm{ship}}^e$ 无法从 $v_b^e$ 减去、投影进 $\hat{v}_A^s$ 的项（横摇/纵荡），须加大 $Q_v$。速度过程噪声仍取 $0.05\,\mathrm{m/s}^2$，用来盖未建模的船运动。仿真 FOG 加表采样噪声是 $0.005\,\mathrm{m/s}^2$（100 Hz，约 $5\times 10^{-4}\,(\mathrm{m/s}^2)/\sqrt{\mathrm{Hz}}$），已经落在这一项里面。
 
-设位时 $P$ 的对角初值：姿态 $(5^\circ)^2$，速度 $(0.5\,\mathrm{m/s})^2$，位置 $(1\,\mathrm{m})^2$，加表零偏 $(0.05\,\mathrm{m/s}^2)^2$，陀螺零偏 $(10^{-3}\,\mathrm{rad/s})^2$，每个比例因子 $0.05^2$。轮速观测用下面第 5.1 节的五维式，不再用单一前向新息。积分用的陀螺和加表先减去已估计零偏。
+IMU 过程噪声对仿真 `N1_robot` 的 FOG 档。角随机游走 $0.001^\circ/\sqrt{\mathrm{h}}$。陀螺零偏稳定度 $0.01^\circ/\mathrm{h}$，加表零偏稳定度 $0.0002\,\mathrm{m/s}^2$，相关时间都是 $\tau=3600\,\mathrm{s}$。滤波里零偏仍是随机游走，驱动噪声取一阶高斯–马尔可夫的强度 $2\sigma^2/\tau$。比例因子功率谱密度仍是 $10^{-8}/\mathrm{s}$。离散传播取 $\Phi\approx I+F\Delta t$，每个 IMU 步做 $P\leftarrow\Phi P\Phi^{\mathrm{T}}+Q$。对角过程噪声是上述功率谱密度乘 $\Delta t$；姿态通道用角随机游走的平方乘 $\Delta t$。
+
+设位时 $P$ 的对角初值：姿态 $(5^\circ)^2$，速度 $(0.5\,\mathrm{m/s})^2$，位置 $(1\,\mathrm{m})^2$，加表零偏 $(0.0002\,\mathrm{m/s}^2)^2$，陀螺零偏 $(0.01^\circ/\mathrm{h})^2$，每个比例因子 $0.05^2$。轮速观测用第 5.1 节。积分用的陀螺和加表先减去已估计零偏。
 
 ### 4.3 可选：滑移状态
 
@@ -567,40 +569,54 @@ $H$ 对 $\delta v^s,\delta\phi,\delta b_g,\delta s,\delta l$ 的结构与 `jacob
 - 平滑窗口仍可用 `ins-odo_odt`（0.2–0.5 s，侧壁比陆地车慢，可略短）。
 - **大相对横摆**放弃本次更新：用 $\lVert\omega_{sb}^b\rVert$ 而不是 $\lVert\omega_{ib}^b\rVert$（模式 B 船体在摇时子陀螺并不小）。门槛可先沿用 $30^\circ/\mathrm{s}$，侧壁建议降到 $15\sim 20^\circ/\mathrm{s}$。
 
-**模式 A 五轮实现（本版已接入）**
+**模式 A 四轮实现（本版已接入）**
 
-本版融合左右大轮和左右小轮，前轮不融合。每一对都是左右先平均，再用该对轮心中点到 IMU 的杆臂补到 FOG。角速度用话题陀螺，先从前-上-右换成前-右-下。杆臂是配置里的前-上-右：先取 fog 到后轮中心，再加上这一对 `rear_to_wheel` 的中点，然后换成前-右-下。杆臂只留在量测里，不进 $H$：
-
-$$
-v_{\mathrm{axle}}=\frac{v_r+v_l}{2},\qquad
-l^b=l_{\mathrm{fog}\rightarrow\mathrm{rear}}^b+\frac{l_r^b+l_l^b}{2}
-$$
+本版融合左右大轮和左右小轮，前轮不融合。每个轮子用自己到 IMU 的杆臂，把前向速度补到 FOG。角速度用话题陀螺，先从前-上-右换成前-右-下。杆臂是配置里的前-上-右：先取 fog 到后轮中心，再加上该轮的 `rear_to_wheel`，然后换成前-右-下。杆臂只留在量测里，不进 $H$：
 
 $$
-v_{\mathrm{fog}}^b=(v_{\mathrm{axle}},\,0,\,0)-\omega^b\times l^b
+l_i^b=l_{\mathrm{fog}\rightarrow\mathrm{rear}}^b+l_{\mathrm{rear}\rightarrow i}^b,\qquad
+v_{\mathrm{fog},i}^b=(v_i,\,0,\,0)-\omega^b\times l_i^b
 $$
 
-N1 上后轮轴中心与 FOG 重合，平均后的杆臂是 0。小轮中点在前-上-右 $(0,-0.075,0)$，前-右-下为 $(0,0,0.075)$。大轮和小轮这两条都送进滤波，前轮不融合。
-
-观测向量仍是五维。第 0 行是大轮轴中心，第 3 行是小轮轴中心。左轮、前轮和另一条小轮行的 $H$ 与新息都是 0：
+观测是 $4\times 1$，顺序为大轮右、大轮左、小轮右、小轮左：
 
 $$
-z_0=v_{\mathrm{fog},x}^{\mathrm{rear}},\qquad
-z_3=v_{\mathrm{fog},x}^{\mathrm{small}},\qquad
-\hat z_0=\Bigl(1+\frac{s_0+s_1}{2}\Bigr)\,v_{\mathrm{rel},x}^b,\qquad
-\hat z_3=\Bigl(1+\frac{s_3+s_4}{2}\Bigr)\,v_{\mathrm{rel},x}^b
-$$
-
-$$
+z_i=v_{\mathrm{fog},x}^{i},\qquad
+\hat z_i=(1+s_{k_i})\,v_{\mathrm{rel},x}^b,\qquad
 v_{\mathrm{rel}}^b=C_s^b v^s,\qquad
 \nu=z-\hat z
 $$
 
-状态仍是 20 维，下标不变：大轮右、左、前，小轮右、左。前轮比例因子留着但没有观测。大轮 $R=(0.1\,\mathrm{m/s})^2$，小轮 $R=(0.05\,\mathrm{m/s})^2$。里程仍按 50 Hz 把相邻帧差分成速度，滤波只用最新的这一组速度，不做平均。融合频率由 `config/localization_v2.yaml` 的 `wheel_fusion_hz` 决定，当前是 50 Hz。更新是 $x\leftarrow x+K(z-\hat z)$，$H=\partial\hat z/\partial x$，与 `rtkcmn.cc` 里 `filter()` 的 $v=$ 量测减预测、$x+Kv$ 同号。非完整性约束见第 5.2 节，频率由 `nhc_hz` 决定，当前是 100 Hz。
+$k_i$ 依次是 $0,1,3,4$。状态仍是 20 维，下标不变：大轮右、左、前，小轮右、左。前轮比例因子留着但没有观测。大轮先验 $R=(0.1\,\mathrm{m/s})^2$，小轮先验 $R=(0.05\,\mathrm{m/s})^2$。里程仍按 50 Hz 把相邻帧差分成速度。融合频率由 `config/localization_v2.yaml` 的 `wheel_fusion_hz` 决定。更新是 $x\leftarrow x+K(z-\hat z)$，$H=\partial\hat z/\partial x$，与 `rtkcmn.cc` 里 `filter()` 的 $v=$ 量测减预测、$x+Kv$ 同号。非完整性约束见第 5.2 节，频率由 `nhc_hz` 决定，不做这套抗差。
 
-$H$ 为 $5\times 20$。位置、加表零偏、陀螺零偏列为 0。两行的速度列都是 $(1+\bar s)\,e_x^{\mathrm{T}}C_s^b$，比例因子为 0 时这两行速度列相同。姿态三列本版写成 0，轮速不改航向，左右轮差速也不做航向修正。大轮 $\bar s=(s_0+s_1)/2$，小轮 $\bar s=(s_3+s_4)/2$。大轮比例因子列在第 15、16 列各写 $v_x/2$，小轮在第 18、19 列也各写同一个 $v_x/2$，这个 $v_x/2$ 不再乘 $(1+\bar s)$。其余三行整行是 0。
+**轮速 IGG3（本版已接入）**
 
-闭环后误差清零：$\delta\phi^b$ 右乘 $C_b^e$（$C_s^e$ 冻结时即改 $C_b^s$），$\delta v^s,\delta p^s$ 经 $C_s^e$ 加进 $v^e,r^e$，零偏和比例因子累加到估计值。贴壁平面、艏向和 ZVU 本版不进这次更新。模式 A 的 NHC 见第 5.2 节，在轮速更新之外按 `nhc_hz` 单独做，当前是 100 Hz。模式 B 仍沿用上面的单轴公式，五轮 $H$ 尚未接入。
+预测速度来自 INS：$\hat z_i$ 就是上面的 $(1+s_{k_i})\,v_{\mathrm{rel},x}^b$。每个轮子单独做抗差，公式与 `src/ins-gnss/rtkpos.cc` 里 `igg3_lambda` 相同（杨元喜 IGG III，方差膨胀因子乘在 $R$ 上，不改预测 $P$）。先用膨胀前的方差算新息协方差对角
+
+$$
+Q_{ii}=(HP_-H^{\mathrm{T}})_{ii}+R_{ii},\qquad
+\tilde v_i=\frac{|\nu_i|}{\sqrt{Q_{ii}}},\qquad
+\nu_i=z_i-\hat z_i
+$$
+
+方差因子
+
+$$
+\lambda_i=
+\begin{cases}
+1, & \tilde v_i\le k_0\\[4pt]
+\dfrac{\tilde v_i}{k_0}\left(\dfrac{k_1-k_0}{k_1-\tilde v_i}\right)^2, & k_0<\tilde v_i<k_1\\[10pt]
+10^6, & \tilde v_i\ge k_1
+\end{cases}
+$$
+
+然后 $R_{ii}\leftarrow\lambda_i R_{ii}$，再用膨胀后的 $R$ 做这一拍的 $K$ 和 Joseph 更新。$\lambda_i=1$ 时该轮与原来的卡尔曼相同；$10^6$ 把这一轮的增益压到近似 0，等价于本拍剔除该轮，另外三个轮子仍按自己的 $\lambda$ 更新。四个轮子的 $\tilde v_i$ 互不影响。
+
+$k_0$、$k_1$ 在 `config/localization_v2.yaml` 的 `wheel_igg3_k0`、`wheel_igg3_k1`。RTK 载波和伪距用的是 2.5 与 8。轮速先放宽到 **5 与 15**，正常巡航的残差停在 $k_0$ 以内，$R$ 保持 0.1 m/s 和 0.05 m/s；只有相对 INS 预测速度明显偏出的那一个轮子才放大方差。
+
+$H$ 为 $4\times 20$。位置、加表零偏、陀螺零偏列为 0。四行速度列都是 $(1+s_{k_i})\,e_x^{\mathrm{T}}C_s^b$。姿态三列写成 0，轮速不改航向，左右轮差速也不做航向修正。比例因子列在第 $15+k_i$ 列写 $v_x$，不再乘 $(1+s_{k_i})$。前轮那一列没有观测。
+
+闭环后误差清零：$\delta\phi^b$ 右乘 $C_b^e$（$C_s^e$ 冻结时即改 $C_b^s$），$\delta v^s,\delta p^s$ 经 $C_s^e$ 加进 $v^e,r^e$，零偏和比例因子累加到估计值。贴壁平面、艏向和 ZVU 本版不进这次更新。模式 A 的 NHC 见第 5.2 节，在轮速更新之外按 `nhc_hz` 单独做。模式 B 仍沿用上面的单轴公式，四轮 $H$ 尚未接入。
 
 ### 5.2 非完整性约束 NHC
 
@@ -674,7 +690,7 @@ $l^b$ 是 FOG 到后轮中心，配置为前-上-右，用前换成前-右-下�
 
 两轴序贯更新，仍是 $x\leftarrow x+K\nu$。速度列就是 $e_2^{\mathrm{T}}C_s^b$、$e_3^{\mathrm{T}}C_s^b$，只对 $v_{\mathrm{imu}}^b$ 求导。侧向和法向的姿态三列本版都写成 0，只拉速度，不改航向和纵摇。$\omega^b$ 和 $l^b$ 都在机体系，姿态误差不进 $\omega\times l$。反馈把修正加进陀螺零偏，所以侧向对 $\delta b_g$ 的列是 $[l^b\times]$ 的右向行 $(l_z,\,0,\,-l_x)$。法向的陀螺零偏列仍是 0。位置、加表零偏、五个比例因子列为 0。
 
-侧向 $R=(0.02\,\mathrm{m/s})^2$，法向 $R=(0.3\,\mathrm{m/s})^2$。$|v_{\mathrm{rel},i}^b|>0.3\,\mathrm{m/s}$ 跳过该轴、以及补偿陀螺零偏后 $\lVert\omega_{ib}^b\rVert>20^\circ/\mathrm{s}$ 两轴都跳过，这两道门本版已屏蔽。后轮中心右向速度和 IMU 下向速度按 `nhc_hz` 更新，当前是每 0.01 s。`SurfaceTight` 时和轮速一起停。贴壁几何、ZVU 仍不在这次更新里。
+侧向和法向都是 $R=(0.02\,\mathrm{m/s})^2$。$|v_{\mathrm{rel},i}^b|>0.3\,\mathrm{m/s}$ 跳过该轴、以及补偿陀螺零偏后 $\lVert\omega_{ib}^b\rVert>20^\circ/\mathrm{s}$ 两轴都跳过，这两道门本版已屏蔽。后轮中心右向速度和 IMU 下向速度按 `nhc_hz` 更新，当前是每 0.01 s。`SurfaceTight` 时和轮速一起停。贴壁几何、ZVU 仍不在这次更新里。
 
 ### 5.3 法向几何的卡尔曼修正
 

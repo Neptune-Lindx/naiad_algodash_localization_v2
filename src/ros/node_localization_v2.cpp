@@ -2,6 +2,7 @@
 
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <functional>
 #include <sstream>
 #include <vector>
@@ -28,6 +29,18 @@ void ship_rfu_to_frd(const double rfu[3], double frd[3])
   frd[2] = -rfu[2];
 }
 
+/// 内部航向绕朝下的 z 轴，从上往下看顺时针为正。status 只在打印时改成逆时针为正。
+double status_yaw_ccw_deg(double yaw_deg)
+{
+  double yaw = -yaw_deg;
+  if (yaw > 180.0) {
+    yaw -= 360.0;
+  } else if (yaw <= -180.0) {
+    yaw += 360.0;
+  }
+  return yaw;
+}
+
 }  // namespace
 
 template <typename MsgT>
@@ -51,6 +64,8 @@ NodeLocalizationV2::NodeLocalizationV2(const std::string & name)
   declare_parameter<int>("schedule_period_ms", 20);
   declare_parameter<double>("wheel_fusion_hz", 50.0);
   declare_parameter<double>("nhc_hz", 100.0);
+  declare_parameter<double>("wheel_igg3_k0", 5.0);
+  declare_parameter<double>("wheel_igg3_k1", 15.0);
   declare_parameter<double>("dive_on_bar", dive_on_bar_);
   declare_parameter<double>("dive_off_bar", dive_off_bar_);
   declare_parameter<double>("align_hold_sec", align_hold_sec_);
@@ -87,6 +102,15 @@ NodeLocalizationV2::NodeLocalizationV2(const std::string & name)
     hull_.set_update_hz(wheel_hz, nhc_hz);
     RCLCPP_INFO(get_logger(), "wheel fusion %.3f Hz, nhc %.3f Hz", wheel_hz, nhc_hz);
   }
+  const double igg3_k0 = get_parameter("wheel_igg3_k0").as_double();
+  const double igg3_k1 = get_parameter("wheel_igg3_k1").as_double();
+  if (!(igg3_k0 > 0.0) || !(igg3_k1 > igg3_k0)) {
+    RCLCPP_ERROR(
+      get_logger(), "wheel IGG3 needs 0 < k0 < k1, got %.3f and %.3f", igg3_k0, igg3_k1);
+  } else {
+    hull_.set_wheel_igg3(igg3_k0, igg3_k1);
+    RCLCPP_INFO(get_logger(), "wheel IGG3 k0=%.3f k1=%.3f", igg3_k0, igg3_k1);
+  }
   dive_on_bar_ = get_parameter("dive_on_bar").as_double();
   dive_off_bar_ = get_parameter("dive_off_bar").as_double();
   align_hold_sec_ = get_parameter("align_hold_sec").as_double();
@@ -105,7 +129,10 @@ NodeLocalizationV2::NodeLocalizationV2(const std::string & name)
     RCLCPP_ERROR(get_logger(), "mode A level specific-force check failed");
   }
   if (!HullFusion::wheel_observation_holds()) {
-    RCLCPP_ERROR(get_logger(), "five-wheel observation H check failed");
+    RCLCPP_ERROR(get_logger(), "four-wheel observation H check failed");
+  }
+  if (!HullFusion::wheel_igg3_holds()) {
+    RCLCPP_ERROR(get_logger(), "wheel IGG3 weight check failed");
   }
   if (!HullFusion::nhc_observation_holds()) {
     RCLCPP_ERROR(get_logger(), "mode A NHC observation H check failed");
@@ -125,14 +152,14 @@ NodeLocalizationV2::NodeLocalizationV2(const std::string & name)
         const auto & small = msg->wheel_odometer;
         const WheelSpeed speed = wheel_odom_speed_.update(
           stamp_sec(msg->header.stamp), motor[0], motor[1], motor[2], small[0], small[1]);
-        if (speed.valid) {
-          RCLCPP_INFO(
-            get_logger(),
-            "motor wheel right=%.4f left=%.4f front=%.4f m/s small wheel right=%.4f left=%.4f m/s "
-            "dt=%.4f",
-            speed.motor_right_mps, speed.motor_left_mps, speed.motor_front_mps,
-            speed.small_right_mps, speed.small_left_mps, speed.dt_sec);
-        }
+        // if (speed.valid) {
+        //   RCLCPP_INFO(
+        //     get_logger(),
+        //     "motor wheel right=%.4f left=%.4f front=%.4f m/s small wheel right=%.4f left=%.4f m/s "
+        //     "dt=%.4f",
+        //     speed.motor_right_mps, speed.motor_left_mps, speed.motor_front_mps,
+        //     speed.small_right_mps, speed.small_left_mps, speed.dt_sec);
+        // }
         if (!speed.valid || !have_fog_) {
           return;
         }
@@ -212,6 +239,7 @@ void NodeLocalizationV2::on_set_position(
   std::shared_ptr<naiad_interfaces::srv::RobotSetPosition::Response> response)
 {
   using ApiState = naiad_interfaces::msg::ApiState;
+  using FogState = naiad_interfaces::msg::FogState;
   if (rtk_available()) {
     if (!gnss_tc_.start_quasi_static_align()) {
       response->result.status = ApiState::RET_NOT_IMPLEMENTED;
@@ -230,6 +258,30 @@ void NodeLocalizationV2::on_set_position(
     RCLCPP_INFO(get_logger(), "algo/set_position rejected: no fog/data");
     return;
   }
+  const uint32_t fog_state = latest_fog_state_.state;
+  if (!have_fog_state_ || (fog_state & FogState::STATE_ALIGNMENT_DONE) == 0) {
+    response->result.status = ApiState::RET_NO_FOG_DATA;
+    response->result.message = "Fail (fog未对准)";
+    RCLCPP_INFO(get_logger(), "algo/set_position rejected: fog alignment not done");
+    return;
+  }
+  const double ship_heading_deg = latest_ais_.heading;
+  if (!have_ais_ || !std::isfinite(ship_heading_deg) ||
+    ship_heading_deg < 0.0 || ship_heading_deg > 360.0)
+  {
+    response->result.status = ApiState::RET_INVALID_DATA;
+    response->result.message = "Fail (没有大船航向)";
+    RCLCPP_INFO(get_logger(), "algo/set_position rejected: no ais heading");
+    return;
+  }
+  const auto & q = latest_fog_.orientation;
+  const double qn = std::sqrt(q.w * q.w + q.x * q.x + q.y * q.y + q.z * q.z);
+  if (!std::isfinite(qn) || qn < 1e-6) {
+    response->result.status = ApiState::RET_INVALID_DATA;
+    response->result.message = "Fail (fog姿态无效)";
+    RCLCPP_INFO(get_logger(), "algo/set_position rejected: fog quaternion invalid");
+    return;
+  }
 
   ModeAOrigin origin;
   origin.valid = true;
@@ -242,22 +294,22 @@ void NodeLocalizationV2::on_set_position(
   origin.latitude_deg = 30.0;
   origin.longitude_deg = 114.0;
   origin.height_m = 0.0;
-  origin.roll_deg = latest_fog_.roll;
-  origin.pitch_deg = latest_fog_.pitch;
-  origin.yaw_deg = latest_fog_.yaw;
-  origin.quat_x = latest_fog_.orientation.x;
-  origin.quat_y = latest_fog_.orientation.y;
-  origin.quat_z = latest_fog_.orientation.z;
-  origin.quat_w = latest_fog_.orientation.w;
+  origin.quat_x = q.x;
+  origin.quat_y = q.y;
+  origin.quat_z = q.z;
+  origin.quat_w = q.w;
+  origin.ship_heading_deg = ship_heading_deg;
   hull_.set_mode_a_origin(origin);
+  const ModeAOrigin & set = hull_.mode_a_origin();
 
   response->result.status = ApiState::RET_SUCCESS;
   response->result.message = "Success";
   RCLCPP_INFO(
     get_logger(),
-    "algo/set_position ship=(%.3f,%.3f,%.3f) llh=(%.1f,%.1f,%.1f) v=0 rpy=(%.3f,%.3f,%.3f)",
+    "algo/set_position ship=(%.3f,%.3f,%.3f) llh=(%.1f,%.1f,%.1f) v=0 "
+    "heading=%.3f rel_rpy=(%.3f,%.3f,%.3f)",
     p_rfu[0], p_rfu[1], p_rfu[2], origin.latitude_deg, origin.longitude_deg,
-    origin.height_m, origin.roll_deg, origin.pitch_deg, origin.yaw_deg);
+    origin.height_m, ship_heading_deg, set.roll_deg, set.pitch_deg, set.yaw_deg);
 }
 
 double NodeLocalizationV2::stamp_sec(const builtin_interfaces::msg::Time & stamp) const
@@ -293,9 +345,22 @@ void NodeLocalizationV2::on_tick()
   hull_.set_wheel_aiding(mode != WorkMode::SurfaceTight);
   const NavStatus status = hull_.step(false);
 
+  builtin_interfaces::msg::Time stamp;
+  if (have_fog_ && (latest_fog_.header.stamp.sec != 0 || latest_fog_.header.stamp.nanosec != 0)) {
+    stamp = latest_fog_.header.stamp;
+  } else {
+    const int64_t ns = now().nanoseconds();
+    stamp.sec = static_cast<int32_t>(ns / 1000000000);
+    stamp.nanosec = static_cast<uint32_t>(ns % 1000000000);
+  }
+  char stamp_text[32];
+  std::snprintf(
+    stamp_text, sizeof(stamp_text), "%d.%09u", stamp.sec, stamp.nanosec);
+
   std_msgs::msg::String text;
   std::ostringstream os;
-  os << "backend=" << status.backend
+  os << "t=" << stamp_text
+     << " backend=" << status.backend
      << " filter_wired=" << (status.filter_wired ? 1 : 0)
      << " solution_valid=" << (status.solution_valid ? 1 : 0)
      << " submerged=" << (submerged ? 1 : 0)
@@ -319,13 +384,13 @@ void NodeLocalizationV2::on_tick()
     ship_frd_to_rfu(status.v_s, v_rfu);
     os << " ps=(" << p_rfu[0] << "," << p_rfu[1] << "," << p_rfu[2] << ")"
        << " vs=(" << v_rfu[0] << "," << v_rfu[1] << "," << v_rfu[2] << ")"
-       << " rpy_s=(" << status.roll_s_deg << "," << status.pitch_s_deg << "," << status.yaw_s_deg
-       << ")"
+       << " rpy_s=(" << status.roll_s_deg << "," << status.pitch_s_deg << ","
+       << status_yaw_ccw_deg(status.yaw_s_deg) << ")"
        << " llh=(" << status.latitude_deg << "," << status.longitude_deg << "," << status.height_m
        << ")"
        << " vn=(" << status.v_n[0] << "," << status.v_n[1] << "," << status.v_n[2] << ")"
-       << " rpy_n=(" << status.roll_n_deg << "," << status.pitch_n_deg << "," << status.yaw_n_deg
-       << ")";
+       << " rpy_n=(" << status.roll_n_deg << "," << status.pitch_n_deg << ","
+       << status_yaw_ccw_deg(status.yaw_n_deg) << ")";
   }
   text.data = os.str();
   status_pub_->publish(text);

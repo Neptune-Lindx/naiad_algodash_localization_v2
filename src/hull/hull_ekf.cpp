@@ -10,15 +10,39 @@ namespace
 {
 
 constexpr int kN = 20;
-constexpr int kM = 5;
+constexpr int kM = 4;
+constexpr int kWheelScale[kM] = {0, 1, 3, 4};
 constexpr double kPi = 3.1415926535897932;
 constexpr double kDeg2Rad = kPi / 180.0;
 constexpr double kMeasVarRear = 0.1 * 0.1;
 constexpr double kMeasVarSmall = 0.05 * 0.05;
+// 仿真 N1 FOG：ARW 0.001 °/√h，陀螺零偏 0.01 °/h，加表零偏 0.0002 m/s²，相关时间 1 h。
+constexpr double kFogArwDegPerSqrtH = 0.001;
+constexpr double kFogGyroBiasDegPerH = 0.01;
+constexpr double kFogAccelBias = 0.0002;
+constexpr double kFogBiasTauSec = 3600.0;
 
 double meas_var(int meas)
 {
-  return meas == 3 ? kMeasVarSmall : kMeasVarRear;
+  return meas >= 2 ? kMeasVarSmall : kMeasVarRear;
+}
+
+/// 杨元喜 IGG3。λ 乘在 R 上，与 rtkpos.cc 的 igg3_lambda 相同。|vt|≥k1 时用 1e6 等价于剔除。
+double igg3_lambda(double vt, double k0, double k1)
+{
+  vt = std::fabs(vt);
+  if (vt <= k0) {
+    return 1.0;
+  }
+  if (k1 <= k0 || vt >= k1) {
+    return 1.0e6;
+  }
+  const double span = k1 - vt;
+  if (span < 1.0e-6) {
+    return 1.0e6;
+  }
+  const double slope = (k1 - k0) / span;
+  return (vt / k0) * slope * slope;
 }
 
 void zero(double * a, int n)
@@ -117,18 +141,19 @@ void orthonormalize(double * c)
   }
 }
 
-bool invert5(const double * a, double * inv)
+bool invert_meas(const double * a, double * inv)
 {
-  double m[5][10];
-  for (int row = 0; row < 5; ++row) {
-    for (int col = 0; col < 5; ++col) {
-      m[row][col] = a[row * 5 + col];
-      m[row][5 + col] = row == col ? 1.0 : 0.0;
+  constexpr int kAug = 2 * kM;
+  double m[kM][kAug];
+  for (int row = 0; row < kM; ++row) {
+    for (int col = 0; col < kM; ++col) {
+      m[row][col] = a[row * kM + col];
+      m[row][kM + col] = row == col ? 1.0 : 0.0;
     }
   }
-  for (int col = 0; col < 5; ++col) {
+  for (int col = 0; col < kM; ++col) {
     int pivot = col;
-    for (int row = col + 1; row < 5; ++row) {
+    for (int row = col + 1; row < kM; ++row) {
       if (std::fabs(m[row][col]) > std::fabs(m[pivot][col])) {
         pivot = row;
       }
@@ -137,29 +162,29 @@ bool invert5(const double * a, double * inv)
       return false;
     }
     if (pivot != col) {
-      for (int j = 0; j < 10; ++j) {
+      for (int j = 0; j < kAug; ++j) {
         const double tmp = m[col][j];
         m[col][j] = m[pivot][j];
         m[pivot][j] = tmp;
       }
     }
     const double diag = m[col][col];
-    for (int j = 0; j < 10; ++j) {
+    for (int j = 0; j < kAug; ++j) {
       m[col][j] /= diag;
     }
-    for (int row = 0; row < 5; ++row) {
+    for (int row = 0; row < kM; ++row) {
       if (row == col) {
         continue;
       }
       const double factor = m[row][col];
-      for (int j = 0; j < 10; ++j) {
+      for (int j = 0; j < kAug; ++j) {
         m[row][j] -= factor * m[col][j];
       }
     }
   }
-  for (int row = 0; row < 5; ++row) {
-    for (int col = 0; col < 5; ++col) {
-      inv[row * 5 + col] = m[row][5 + col];
+  for (int row = 0; row < kM; ++row) {
+    for (int col = 0; col < kM; ++col) {
+      inv[row * kM + col] = m[row][kM + col];
     }
   }
   return true;
@@ -173,23 +198,21 @@ void body_velocity(const double * c_bs, const double * v_s, double * v_b)
   }
 }
 
-/// 一行轴中心观测。gain = 1+(s_a+s_b)/2，比例因子列各写 v_x/2。姿态三列为 0。
-void fill_axle_row(
-  double * h, double * jacobian, int row_index, int scale_a, int scale_b, const double * c_bs,
+/// 一个轮子的前向观测。gain = 1+s_i，比例因子列写 v_x。姿态三列为 0。
+void fill_wheel_row(
+  double * h, double * jacobian, int row_index, int scale_index, const double * c_bs,
   const double * v_b, const double * scale)
 {
-  const double gain = 1.0 + 0.5 * (scale[scale_a] + scale[scale_b]);
+  const double gain = 1.0 + scale[scale_index];
   h[row_index] = gain * v_b[0];
   double * row = jacobian + row_index * kN;
   row[3] = gain * c_bs[0];
   row[4] = gain * c_bs[1];
   row[5] = gain * c_bs[2];
-  row[15 + scale_a] = 0.5 * v_b[0];
-  row[15 + scale_b] = 0.5 * v_b[0];
+  row[15 + scale_index] = v_b[0];
 }
 
-/// H 行主序 5×20。第 0 行是大轮轴中心（s_0 与 s_1），第 3 行是小轮轴中心（s_3 与 s_4）。
-/// 两行速度列形式相同。同一对比例因子两列都写 v_x/2。前轮、左轮和另一条小轮行保持 0。
+/// H 行主序 4×20。顺序是大轮右、大轮左、小轮右、小轮左，对应 s_0、s_1、s_3、s_4。前轮不在观测里。
 void wheel_observation(
   const double * c_bs, const double * v_s, const double * scale, double * h, double * jacobian)
 {
@@ -197,12 +220,13 @@ void wheel_observation(
   body_velocity(c_bs, v_s, v_b);
   zero(h, kM);
   zero(jacobian, kM * kN);
-  fill_axle_row(h, jacobian, 0, 0, 1, c_bs, v_b, scale);
-  fill_axle_row(h, jacobian, 3, 3, 4, c_bs, v_b, scale);
+  for (int row = 0; row < kM; ++row) {
+    fill_wheel_row(h, jacobian, row, kWheelScale[row], c_bs, v_b, scale);
+  }
 }
 
 constexpr double kNhcVarY = 0.02 * 0.02;
-constexpr double kNhcVarZ = 0.3 * 0.3;
+constexpr double kNhcVarZ = 0.02 * 0.02;
 
 /// 模式 A 的一条 NHC。axis 为 1（侧向，后轮中心）或 2（法向，IMU）。量测为 0。
 /// 两行姿态三列都是 0，只改对应的速度。侧向预测是 e_y·(v_imu + ω×l)，零偏列是 [l×] 的右向行。
@@ -231,8 +255,9 @@ void HullFusion::reset_error_covariance()
   const double att = std::pow(5.0 * kDeg2Rad, 2.0);
   const double vel = 0.5 * 0.5;
   const double pos = 1.0;
-  const double acc_bias = 0.05 * 0.05;
-  const double gyro_bias = 1e-3 * 1e-3;
+  const double acc_bias = kFogAccelBias * kFogAccelBias;
+  const double gyro_bias_rad = kFogGyroBiasDegPerH * kDeg2Rad / 3600.0;
+  const double gyro_bias = gyro_bias_rad * gyro_bias_rad;
   const double scale = 0.05 * 0.05;
   for (int i = 0; i < 3; ++i) {
     P_[i + kN * i] = att;
@@ -258,6 +283,33 @@ void HullFusion::set_update_hz(double wheel_hz, double nhc_hz)
 {
   wheel_period_sec_ = 1.0 / wheel_hz;
   nhc_period_sec_ = 1.0 / nhc_hz;
+}
+
+void HullFusion::set_wheel_igg3(double k0, double k1)
+{
+  igg3_k0_ = k0;
+  igg3_k1_ = k1;
+}
+
+bool HullFusion::wheel_igg3_holds()
+{
+  if (std::fabs(igg3_lambda(0.0, 5.0, 15.0) - 1.0) > 1e-12) {
+    return false;
+  }
+  if (std::fabs(igg3_lambda(5.0, 5.0, 15.0) - 1.0) > 1e-12) {
+    return false;
+  }
+  // |vt|=10：(|vt|/k0)*((k1-k0)/(k1-|vt|))^2 = 2 * 2^2 = 8
+  if (std::fabs(igg3_lambda(10.0, 5.0, 15.0) - 8.0) > 1e-9) {
+    return false;
+  }
+  if (std::fabs(igg3_lambda(-10.0, 5.0, 15.0) - 8.0) > 1e-9) {
+    return false;
+  }
+  if (igg3_lambda(15.0, 5.0, 15.0) < 1.0e5 || igg3_lambda(20.0, 5.0, 15.0) < 1.0e5) {
+    return false;
+  }
+  return true;
 }
 
 void HullFusion::propagate_error(double dt, const double * f_b)
@@ -292,11 +344,12 @@ void HullFusion::propagate_error(double dt, const double * f_b)
   transpose_n(phi, phi_t);
   mul_nn(tmp, phi_t, P_);
 
-  const double arw = 0.01 * kDeg2Rad / 60.0;
+  const double arw = kFogArwDegPerSqrtH * kDeg2Rad / 60.0;
   const double q_att = arw * arw * dt;
   const double q_vel = 0.05 * 0.05 * dt;
-  const double q_ba = 1e-8 * dt;
-  const double q_bg = 1e-12 * dt;
+  const double gyro_bias_rad = kFogGyroBiasDegPerH * kDeg2Rad / 3600.0;
+  const double q_ba = (2.0 * kFogAccelBias * kFogAccelBias / kFogBiasTauSec) * dt;
+  const double q_bg = (2.0 * gyro_bias_rad * gyro_bias_rad / kFogBiasTauSec) * dt;
   const double q_s = 1e-8 * dt;
   for (int i = 0; i < 3; ++i) {
     P_[i + kN * i] += q_att;
@@ -364,8 +417,9 @@ bool HullFusion::update_wheels(double t_sec, const WheelSpeedAtFog & speed)
   double h[kM];
   double jacobian[kM * kN];
   wheel_observation(c_bs, v_s, scale_, h, jacobian);
-  // 第 0 行是大轮轴中心，第 3 行是小轮轴中心。量测都已是左右平均并补到 IMU 后的前向速度。
-  double z[kM] = {speed.motor_right[0], 0.0, 0.0, speed.small_right[0], 0.0};
+  // 四个轮子各自补到 IMU 后的前向速度。顺序与 kWheelScale 相同。
+  const double z[kM] = {
+    speed.motor_right[0], speed.motor_left[0], speed.small_right[0], speed.small_left[0]};
 
   double pht[kN * kM];
   for (int meas = 0; meas < kM; ++meas) {
@@ -377,18 +431,36 @@ bool HullFusion::update_wheels(double t_sec, const WheelSpeedAtFog & speed)
       pht[row + kN * meas] = sum;
     }
   }
+  double r_var[kM];
+  for (int meas = 0; meas < kM; ++meas) {
+    r_var[meas] = meas_var(meas);
+  }
   double innov_cov[kM * kM];
   for (int row = 0; row < kM; ++row) {
     for (int col = 0; col < kM; ++col) {
-      double sum = row == col ? meas_var(row) : 0.0;
+      double sum = row == col ? r_var[row] : 0.0;
       for (int k = 0; k < kN; ++k) {
         sum += jacobian[row * kN + k] * pht[k + kN * col];
       }
       innov_cov[row * kM + col] = sum;
     }
   }
+  // 预测新息方差用膨胀前的 R。标准化残差相对 INS 预测速度，再把 λ 乘回该轮的 R。
+  if (igg3_k0_ > 0.0) {
+    for (int meas = 0; meas < kM; ++meas) {
+      const double qii = innov_cov[meas * kM + meas];
+      if (!(qii > 1.0e-12)) {
+        continue;
+      }
+      const double vt = std::fabs(z[meas] - h[meas]) / std::sqrt(qii);
+      const double lambda = igg3_lambda(vt, igg3_k0_, igg3_k1_);
+      const double inflated = r_var[meas] * lambda;
+      innov_cov[meas * kM + meas] += inflated - r_var[meas];
+      r_var[meas] = inflated;
+    }
+  }
   double inv_s[kM * kM];
-  if (!invert5(innov_cov, inv_s)) {
+  if (!invert_meas(innov_cov, inv_s)) {
     return false;
   }
   double gain[kN * kM];
@@ -429,7 +501,7 @@ bool HullFusion::update_wheels(double t_sec, const WheelSpeedAtFog & speed)
     for (int row = 0; row < kN; ++row) {
       double extra = 0.0;
       for (int meas = 0; meas < kM; ++meas) {
-        extra += gain[row + kN * meas] * meas_var(meas) * gain[col + kN * meas];
+        extra += gain[row + kN * meas] * r_var[meas] * gain[col + kN * meas];
       }
       P_[row + kN * col] += extra;
     }
@@ -543,37 +615,25 @@ bool HullFusion::wheel_observation_holds()
   double jacobian[kM * kN];
   wheel_observation(c_bs, v_s, scale0, h0, jacobian);
 
-  const int silent[3] = {1, 2, 4};
-  for (int row : silent) {
-    if (std::fabs(h0[row]) > 1e-12) {
+  for (int row = 0; row < kM; ++row) {
+    if (std::fabs(h0[row] - v_s[0]) > 1e-12) {
       return false;
     }
-    for (int col = 0; col < kN; ++col) {
+    for (int col = 0; col < 3; ++col) {
       if (std::fabs(jacobian[row * kN + col]) > 1e-12) {
         return false;
       }
     }
-  }
-  const int axles[2] = {0, 3};
-  for (int row : axles) {
     for (int col = 6; col < 15; ++col) {
       if (std::fabs(jacobian[row * kN + col]) > 1e-12) {
         return false;
       }
     }
-    if (std::fabs(h0[row] - v_s[0]) > 1e-12) {
-      return false;
-    }
-  }
-  const double half = 0.5 * v_s[0];
-  for (int col = 0; col < kM; ++col) {
-    const double rear = (col == 0 || col == 1) ? half : 0.0;
-    const double small = (col == 3 || col == 4) ? half : 0.0;
-    if (std::fabs(jacobian[15 + col] - rear) > 1e-12) {
-      return false;
-    }
-    if (std::fabs(jacobian[3 * kN + 15 + col] - small) > 1e-12) {
-      return false;
+    for (int col = 0; col < 5; ++col) {
+      const double expect = col == kWheelScale[row] ? v_s[0] : 0.0;
+      if (std::fabs(jacobian[row * kN + 15 + col] - expect) > 1e-12) {
+        return false;
+      }
     }
   }
 
@@ -584,46 +644,32 @@ bool HullFusion::wheel_observation_holds()
     double h_step[kM];
     double unused[kM * kN];
     wheel_observation(c_bs, v_step, scale0, h_step, unused);
-    for (int row : axles) {
+    for (int row = 0; row < kM; ++row) {
       const double numeric = (h_step[row] - h0[row]) / eps;
       if (std::fabs(numeric - jacobian[row * kN + 3 + axis]) > 1e-6) {
-        return false;
-      }
-      if (std::fabs(jacobian[row * kN + axis]) > 1e-12) {
-        return false;
-      }
-      if (std::fabs(jacobian[row * kN + 3 + axis] - jacobian[3 + axis]) > 1e-12) {
         return false;
       }
     }
   }
 
   const double scale[5] = {0.1, -0.2, 0.0, 0.3, -0.1};
-  const double gain_rear = 1.0 + 0.5 * (scale[0] + scale[1]);
-  const double gain_small = 1.0 + 0.5 * (scale[3] + scale[4]);
-  const double gain_axle[2] = {gain_rear, gain_small};
   double h_scaled[kM];
   double scaled[kM * kN];
   wheel_observation(c_bs, v_s, scale, h_scaled, scaled);
-  for (int i = 0; i < 2; ++i) {
-    const int row = axles[i];
-    if (std::fabs(h_scaled[row] - gain_axle[i] * v_s[0]) > 1e-12) {
+  for (int row = 0; row < kM; ++row) {
+    const double gain = 1.0 + scale[kWheelScale[row]];
+    if (std::fabs(h_scaled[row] - gain * v_s[0]) > 1e-12) {
       return false;
     }
     for (int col = 0; col < 15; ++col) {
-      if (std::fabs(scaled[row * kN + col] - gain_axle[i] * jacobian[row * kN + col]) > 1e-9) {
+      if (std::fabs(scaled[row * kN + col] - gain * jacobian[row * kN + col]) > 1e-9) {
         return false;
       }
     }
-    for (int col = 0; col < kM; ++col) {
+    for (int col = 0; col < 5; ++col) {
       if (std::fabs(scaled[row * kN + 15 + col] - jacobian[row * kN + 15 + col]) > 1e-12) {
         return false;
       }
-    }
-  }
-  for (int row : silent) {
-    if (std::fabs(h_scaled[row]) > 1e-12) {
-      return false;
     }
   }
   return true;

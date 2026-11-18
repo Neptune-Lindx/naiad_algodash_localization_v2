@@ -31,8 +31,7 @@ struct WheelLeverArms
 };
 
 /// 折到 fog 原点后的速度，单位 m/s。分量是算法机体系前、右、下。
-/// motor_right 是左右大轮平均后再按后轴中心杆臂补偿的结果。
-/// small_right 是左右小轮平均后再按小轮中点杆臂补偿的结果。其余三槽本版不用。
+/// 每个轮子用自己的杆臂：v = (v,0,0) - ω×l。前轮也投影，滤波不用它。
 struct WheelSpeedAtFog
 {
   bool valid{false};
@@ -44,7 +43,7 @@ struct WheelSpeedAtFog
 };
 
 /// 话题与杆臂是前-上-右，先换成算法机体系前-右-下。
-/// 左右轮先平均，再用该对轮心中点的杆臂：v = (v,0,0) - ω×l。
+/// 每个轮子单独投影到 IMU：v = (v,0,0) - ω×l。
 WheelSpeedAtFog project_wheel_speed_to_fog(
   const WheelSpeed & speed, const WheelLeverArms & levers, double gyro_x, double gyro_y,
   double gyro_z);

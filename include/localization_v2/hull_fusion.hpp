@@ -24,6 +24,8 @@ struct ModeAOrigin
   double quat_y{0.0};
   double quat_z{0.0};
   double quat_w{1.0};
+  /// AIS 船首向，度。从北向东为正。把 FOG 北天东姿态转到大船前右下。
+  double ship_heading_deg{0.0};
   double latitude_deg{30.0};
   double longitude_deg{114.0};
   double height_m{0.0};
@@ -63,8 +65,8 @@ public:
   /// 水平静止、比力沿话题 y 轴向上时，短时间速度应留在零附近。
   static bool level_specific_force_holds();
 
-  /// 轮速观测阵：大轮轴中心在第 0 行，小轮轴中心在第 3 行。两行姿态三列为 0，速度列形式相同。
-  /// 大轮比例因子占 s_0、s_1，小轮占 s_3、s_4，同一对的两列都是 v_x/2。其余三行为 0。
+  /// 轮速观测阵 4×20。顺序是大轮右、大轮左、小轮右、小轮左。姿态三列为 0。
+  /// 比例因子分别占 s_0、s_1、s_3、s_4，系数是 v_x。前轮比例因子没有观测。
   static bool wheel_observation_holds();
 
   /// 模式 A 非完整性约束：侧向和法向都只改速度，姿态三列为 0。
@@ -76,7 +78,14 @@ public:
   /// 轮速融合和非完整性约束的更新频率，单位 Hz。两个值都要大于 0。
   void set_update_hz(double wheel_hz, double nhc_hz);
 
-  /// 轮速更新。频率由 set_update_hz 决定。大轮和小轮各自左右平均后补到 IMU，只用前向分量。姿态三列为 0。t_sec 用轮速消息时间。
+  /// 轮速 IGG3 的标准化残差门槛。k0、k1 都要大于 0，且 k1 大于 k0。k0≤0 时这次不抗差。
+  void set_wheel_igg3(double k0, double k1);
+
+  /// IGG3 方差因子：|vt|≤k0 为 1，中间段放大，|vt|≥k1 为 1e6。
+  static bool wheel_igg3_holds();
+
+  /// 轮速更新。频率由 set_update_hz 决定。四个轮子各自补到 IMU 后只取前向分量。姿态三列为 0。
+  /// 每个轮子按相对 INS 预测速度的标准化残差做 IGG3，只放大该轮的 R。t_sec 用轮速消息时间。
   bool update_wheels(double t_sec, const WheelSpeedAtFog & speed);
 
   static HullVariant parse(const std::string & text);
@@ -119,6 +128,8 @@ private:
   double nhc_period_sec_{0.01};
   double wheel_sec_{-1.0};
   double nhc_sec_{-1.0};
+  double igg3_k0_{5.0};
+  double igg3_k1_{15.0};
 };
 
 }  // namespace localization_v2

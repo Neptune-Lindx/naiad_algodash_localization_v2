@@ -1,0 +1,26 @@
+# neptune-sim 启动 naiad_localization_v2。
+# 节点参数仍用 config/localization_v2.yaml。
+# 本文件只给 scripts/start_neptune_sim_localization_v2.sh 读。
+#
+# 仿真：
+#   /home/neptune-lindx/src/C/neptune-sim
+#   world: sim/worlds/neptune_cleaning_floating_dual_demo.sdf
+#   robot: N1_robot（右舷）
+#
+# 桥已经提供 /fog/data、/sensor_depth/data、/motion/odometer、/ais/data。
+# v2 没有 algo/transform。设位只要求已经收到 fog/data，姿态取该帧的 roll/pitch/yaw。
+
+neptune_sim:
+  ros__parameters:
+    # true：发布 fog/state=ALIGNMENT_DONE，不再等真实 FOG 对准。
+    # v2 的 algo/set_position 不看这个状态，对准完成只是把流程补齐。
+    skip_fog_align: true
+    # algo/set_position 的后轮中心，大船右-前-上，单位 m。
+    initial_x: 0.0
+    initial_y: 0.0
+    initial_z: 0.0
+    # 0 右舷 / 1 底板 / 2 左舷。N1_robot 贴在 hull_main 右舷。
+    ship_work_board: 0
+    ship_draft: 0.0
+    robot_profile: /home/neptune-lindx/src/C/naiad_workspace/src/naiad_launch/profiles/robot_n1.yaml
+    neptune_sim_root: /home/neptune-lindx/src/C/neptune-sim

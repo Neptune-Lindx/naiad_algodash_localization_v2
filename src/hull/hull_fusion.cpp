@@ -121,7 +121,8 @@ double gravity_down(double lat, double h)
 }
 
 /// 与 ins.cc rpy2dcm 同一组 3-2-1 角，输出机体到北东地。角的单位是弧度。
-void rpy_to_cbn(double roll, double pitch, double yaw, double * c_bn)
+/// 设位姿态改由四元数进入，这里保留成 cbn_to_rpy 的逆变换。
+[[maybe_unused]] void rpy_to_cbn(double roll, double pitch, double yaw, double * c_bn)
 {
   const double sp = std::sin(roll);
   const double cp = std::cos(roll);
@@ -194,6 +195,13 @@ void quat_normalize(double * q)
   }
 }
 
+void nte_to_ned(const double nte[3], double ned[3])
+{
+  ned[0] = nte[0];
+  ned[1] = nte[2];
+  ned[2] = -nte[1];
+}
+
 void quat_to_dcm(const double * q, double * c)
 {
   const double a = q[0];
@@ -209,6 +217,34 @@ void quat_to_dcm(const double * q, double * c)
   c[6] = 2.0 * (b * e + a * d);
   c[7] = 2.0 * (d * e - a * b);
   c[8] = a * a - b * b - d * d + e * e;
+}
+
+/// FOG orientation 是机体前-上-右到北-天-东。这里换成滤波用的前-右-下到北-东-地。
+void fog_quat_to_cbn(double w, double x, double y, double z, double * c_bn)
+{
+  const double n = std::sqrt(w * w + x * x + y * y + z * z);
+  double q[4] = {1.0, 0.0, 0.0, 0.0};
+  if (n >= 1e-12) {
+    q[0] = w / n;
+    q[1] = x / n;
+    q[2] = y / n;
+    q[3] = z / n;
+  }
+  double c_fur_nte[9];
+  quat_to_dcm(q, c_fur_nte);
+  for (int axis = 0; axis < 3; ++axis) {
+    double nte[3];
+    double ned[3];
+    for (int row = 0; row < 3; ++row) {
+      nte[row] = c_fur_nte[row + 3 * axis];
+    }
+    nte_to_ned(nte, ned);
+    const double sign = axis == 1 ? -1.0 : 1.0;
+    const int col = axis == 0 ? 0 : (axis == 1 ? 2 : 1);
+    for (int row = 0; row < 3; ++row) {
+      c_bn[row + 3 * col] = sign * ned[row];
+    }
+  }
 }
 
 void dcm_to_quat(const double * c, double * q)
@@ -343,17 +379,22 @@ void HullFusion::set_mode_a_origin(const ModeAOrigin & origin)
   double c_ne[9];
   ned_to_ecef(lat, lon, c_ne);
   double c_bn[9];
-  rpy_to_cbn(
-    origin.roll_deg * kDeg2Rad, origin.pitch_deg * kDeg2Rad, origin.yaw_deg * kDeg2Rad, c_bn);
+  fog_quat_to_cbn(origin.quat_w, origin.quat_x, origin.quat_y, origin.quat_z, c_bn);
   mat_mul(c_ne, c_bn, Cbe_);
-  // 还没有 3 min 艏向。准船体航向先冻结为 0：艏向指北，横滚纵摇为 0。
-  ship_dcm(0.0, c_ne, Cse_);
+  ship_dcm(origin.ship_heading_deg * kDeg2Rad, c_ne, Cse_);
   double l_frd[3];
   fur_to_frd(lever_fur_, l_frd);
   double cse_t[9];
   transpose(Cse_, cse_t);
   double c_bs[9];
   mat_mul(cse_t, Cbe_, c_bs);
+  double rel_roll = 0.0;
+  double rel_pitch = 0.0;
+  double rel_yaw = 0.0;
+  cbn_to_rpy(c_bs, &rel_roll, &rel_pitch, &rel_yaw);
+  origin_.roll_deg = rel_roll * kRad2Deg;
+  origin_.pitch_deg = rel_pitch * kRad2Deg;
+  origin_.yaw_deg = rel_yaw * kRad2Deg;
   double l_s[3];
   double l_e[3];
   mat_vec(c_bs, l_frd, l_s);
