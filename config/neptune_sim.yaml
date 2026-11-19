@@ -15,7 +15,9 @@ neptune_sim:
     # true：发布 fog/state=ALIGNMENT_DONE，不再等真实 FOG 对准。
     # v2 的 algo/set_position 不看这个状态，对准完成只是把流程补齐。
     skip_fog_align: true
-    # algo/set_position 的后轮中心，大船右-前-上，单位 m。
+    # 与 naiad_algodash_localization_sim 相同：位置用这三个数，默认 0 0 0。
+    # 不读 rel_odo 的当前位置。rel_odo 只用来确认黑线起点已经记下。
+    # 大船右-前-上，单位 m。
     initial_x: 0.0
     initial_y: 0.0
     initial_z: 0.0

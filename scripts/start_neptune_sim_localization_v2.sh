@@ -254,7 +254,7 @@ class NeptuneSimInit(Node):
             self.get_logger().info(f"waiting for algo/set_position ({self._attempts})")
             return
         req = RobotSetPosition.Request()
-        req.frame_id = "ship"
+        req.frame_id = "odom"
         req.position = Point(x=mark[0], y=mark[1], z=mark[2])
         req.orientation = Quaternion(x=0.0, y=0.0, z=0.0, w=1.0)
         self._busy = True
