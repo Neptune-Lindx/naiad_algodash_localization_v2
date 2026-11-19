@@ -61,13 +61,14 @@ wait_for_topic() {
 
 # 黑线起点由 Gazebo 插件锁在第一帧船体系真值上。红线偏移用「黑线第一个点 − 红线第一帧」。
 # 红线第一帧必须在黑线已经有点之后才发出，否则那一帧只被记下来、不画，起点会错开。
+# rel_odo 由仿真桥以 best_effort 发出，先按这个可靠性等。
 wait_for_black_origin() {
   local topic="/sim/N1_robot/rel_odo" timeout_s="${1:-30}"
   echo "Waiting for one ${topic} message before set_position..."
-  if timeout 8 ros2 topic echo "${topic}" --once >/dev/null 2>&1; then
+  if timeout "${timeout_s}" ros2 topic echo "${topic}" --qos-reliability best_effort --once >/dev/null 2>&1; then
     return 0
   fi
-  if timeout "${timeout_s}" ros2 topic echo "${topic}" --qos-reliability best_effort --once >/dev/null 2>&1; then
+  if timeout 8 ros2 topic echo "${topic}" --once >/dev/null 2>&1; then
     return 0
   fi
   echo "ERROR: ${topic} had no message. Black trajectory origin is not locked yet." >&2
